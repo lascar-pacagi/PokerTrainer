@@ -1,0 +1,16 @@
+{
+  "oop_range": "66+,A8s+,A5s-A4s,AJo+,K9s+,KQo,QTs+,JTs",
+  "ip_range":  "QQ-22,AQs-A2s,ATo+,K5s+,KJo+,Q8s+,J8s+",
+  "flop": "Td9d6h",
+  "turn": null,
+  "river": null,
+  "starting_pot": 60,
+  "effective_stack": 970,
+  "rake_rate": 0.0,
+  "rake_cap": 0.0,
+  "flop_bet_sizes":  { "bet": "50%", "raise": "2.5x" },
+  "turn_bet_sizes":  { "bet": "50%", "raise": "2.5x" },
+  "river_bet_sizes": { "bet": "50%,a", "raise": "2.5x" },
+  "max_iterations": 50,
+  "target_exploitability_pct_pot": 1.0
+}
