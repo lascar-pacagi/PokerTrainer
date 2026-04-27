@@ -46,7 +46,7 @@ int ModelInference::score_and_argmax(const EncodedState& state,
     auto opts = torch::TensorOptions().dtype(torch::kFloat32);
 
     // x lives in EncodedState as a fixed-size array. from_blob + expand gives
-    // a (n, X_DIM) view without copying the 745 floats n times.
+    // a (n, X_DIM) view without copying X_DIM floats n times.
     torch::Tensor x = torch::from_blob(
         const_cast<float*>(state.x.data()), {1, X_DIM}, opts).expand({n, X_DIM});
     torch::Tensor a = torch::from_blob(

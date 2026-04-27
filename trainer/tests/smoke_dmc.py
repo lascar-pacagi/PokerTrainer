@@ -68,11 +68,12 @@ def main() -> None:
     assert float(np.max(np.abs(buf.r[:len(buf)]))) <= 200.0, \
         f"reward magnitude too big: {np.max(np.abs(buf.r[:len(buf)]))}"
 
-    # Sanity check: valid-mask within a sampled x agrees with the history rows
-    # being populated (at least one valid row, since every transition happens
-    # at least one action into the hand for the non-first-actor).
-    any_valid = buf.x[:len(buf), pte.X_OFF_VALID_MASK:
-                                  pte.X_OFF_VALID_MASK + pte.HIST_MAX].sum(axis=1)
+    # Sanity check (v0.3): is_real bit at offset 0 of each history row tells
+    # us how many rows are populated. Each transition happens at least one
+    # action into the hand for the non-first-actor, so most sampled x's have
+    # at least one populated row; the bound is HIST_MAX.
+    is_real_col_offsets = pte.X_OFF_HIST + np.arange(pte.HIST_MAX) * pte.HIST_FEAT
+    any_valid = buf.x[:len(buf), is_real_col_offsets].sum(axis=1)
     assert (any_valid >= 0).all() and any_valid.max() <= pte.HIST_MAX
 
     # --- phase 2: a handful of gradient steps ---

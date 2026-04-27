@@ -12,14 +12,15 @@ import pokertrainer_engine as pte
 print(f"module version check — X_DIM={pte.X_DIM}, A_DIM={pte.A_DIM}, "
       f"HIST_MAX={pte.HIST_MAX}, HIST_FEAT={pte.HIST_FEAT}, "
       f"NUM_ACTIONS={pte.NUM_ACTIONS}")
-assert pte.X_DIM == 745
-assert pte.A_DIM == 17
+assert pte.X_DIM == 732
+assert pte.A_DIM == 11
 assert pte.HIST_MAX == 24
 assert pte.HIST_FEAT == 25
 assert pte.NUM_ACTIONS == 11
-assert pte.STATIC_DIM == 121
-assert pte.X_OFF_HIST == 121
-assert pte.X_OFF_VALID_MASK == 721
+assert pte.STATIC_DIM == 132
+assert pte.LEGAL_MASK_DIM == 11
+assert pte.X_OFF_LEGAL_MASK == 121
+assert pte.X_OFF_HIST == 132
 
 # One complete hand: check-call all the way to showdown.
 env = pte.Env(seed=2026)
@@ -33,11 +34,19 @@ while not env.is_terminal():
     assert obs.x.shape == (pte.X_DIM,) and obs.x.dtype == np.float32
     assert obs.a.shape == (len(obs.legal), pte.A_DIM)
     assert obs.legal_idx.shape == (len(obs.legal),)
-    # Valid-mask only 1.0 for as many actions as have happened so far,
-    # saturating at HIST_MAX.
-    n_valid = int(obs.x[pte.X_OFF_VALID_MASK:pte.X_OFF_VALID_MASK + pte.HIST_MAX].sum())
+    # is_real bit at offset 0 of each history row counts populated rows,
+    # saturating at HIST_MAX. Reads each row's first entry directly.
+    is_real_offsets = pte.X_OFF_HIST + np.arange(pte.HIST_MAX) * pte.HIST_FEAT
+    n_valid = int(obs.x[is_real_offsets].sum())
     hist_n = env.state().history_size
     assert n_valid == min(hist_n, pte.HIST_MAX), (n_valid, hist_n)
+
+    # Legal-actions mask block matches the legal list.
+    legal_set = {int(a) for a in obs.legal}
+    for k in range(pte.LEGAL_MASK_DIM):
+        bit = obs.x[pte.X_OFF_LEGAL_MASK + k]
+        expected = 1.0 if k in legal_set else 0.0
+        assert bit == expected, (k, bit, expected)
 
     # Preflop sanity: exactly 2 hole-card bits, 0 board-card bits.
     if env.state().street == pte.Street.PREFLOP:

@@ -1,22 +1,41 @@
 # State Encoding Specification
 
-**Status:** v0.2 (flat-sequence layout, heads-up NLHE). Bit-identical outputs
+**Status:** v0.3 (flat-sequence layout, heads-up NLHE). Bit-identical outputs
 required from `engine/src/encoder.cpp` and `trainer/dmc/features.py`. Any
 change here requires updating both and running the parity tests in
 `engine/tests/test_encoder.cpp` and `trainer/tests/test_features_parity.py`.
 
-## What changed from v0.1 / v0.2
+## What changed from v0.2
 
-- **Dropped the `z` history tensor and the LSTM.** The full action history is
-  now flattened into `x` as 24 fixed-width rows + a 24-bit valid-mask.
-- **Added `RAISE_25` (0.25× pot) as the smallest raise slot** — supports block
-  bets and tiny c-bets that the previous 0.33-floor couldn't express.
-  `NUM_ACTIONS` 10 → 11, `A_DIM` 16 → 17, `HIST_FEAT` 24 → 25, `X_DIM` 721 → 745.
-- Rationale: HU NLHE has a tiny action alphabet (11 types) and a bounded
-  sequence (≤ 24 actions/hand). Flattening gives the MLP direct access to every
-  past action without a recurrent bottleneck; the per-slot weights specialize
-  to "row k means action-index-k." LSTM added training instability on MC
-  targets without obvious representational gain for a 24-step bounded sequence.
+- **`a` rows are pure 11-dim action one-hots.** All 6 state-dependent
+  scalars (`bet_to_bb`, `bet_frac_pot`, `pot_after_bb`, `stack_after_bb`,
+  `is_all_in`, `is_raise`) are removed. Action representation no longer
+  varies by state — same action ⇒ same `a` row regardless of context.
+  `A_DIM` 17 → 11.
+- **State-level legal-actions mask added to `x`**: 11 bits at offset 121
+  showing which `ActionType` slots are legal in the current state.
+- **`is_real` inlined as bit 0 of every history row.** The previous
+  external 24-bit valid-mask block (positions 721–744) is removed; padded
+  rows distinguish themselves by being all-zero.
+- **History rows now populate `stack_after_bb` and `was_all_in` for
+  real.** Previously hard-zeroed (engine couldn't reconstruct without
+  full replay). `AppliedAction` was extended with `stack_after_chips`
+  and `was_all_in` fields, populated during `HUGame::step()`.
+- `STATIC_DIM` 121 → 132 (added 11-bit legal mask). `X_DIM` 745 → 732.
+  `HIST_FEAT` stays 25 (same width, different content).
+- **Rationale for 11-dim one-hot `a`**: the v0.2 design embedded
+  state-derived scalars in each row, which (a) made the same action have
+  different `a` vectors across states (the network had to *learn* the
+  equivalence class), (b) double-counted information already in `x`, and
+  (c) routed gradients for shared "what does this action mean" knowledge
+  through both the one-hot and scalar weights, smearing the
+  representation. Pure one-hots eliminate this.
+- **Rationale for the legal mask in `x`**: replaces the implicit
+  legality signal that v0.2 carried via `a`'s row count. Gives the
+  network a single, well-defined place to read "what is the action menu
+  in this state" — useful context for valuing any individual action
+  (e.g., a 75% raise means something different when ALL_IN is also
+  available vs. when it isn't).
 
 ## Card index convention
 
@@ -50,28 +69,24 @@ This matches the hand evaluator's `make_card(rank, suit)` indexing.
 Raises below legal min-raise are snapped up; above effective stack are snapped
 down to all-in. Illegal actions are masked at the Env level. Note: on small
 pots, RAISE_25 often snaps up to min-raise and becomes indistinguishable from
-RAISE_33 — that's expected, the network learns to ignore duplicate slots.
+RAISE_33 — the engine de-duplicates and only the smaller of the colliding
+slots appears in the legal set. The legal-actions mask in `x` (see below)
+makes this visible to the network.
 
-## Per-action encoding vector `a` (17 floats)
+## Per-action encoding `a` (11 floats per row)
 
-| slice          | dims | meaning                                               |
-|----------------|------|-------------------------------------------------------|
-| action_type    | 11   | one-hot over {fold, check/call, 8× raise, all-in}     |
-| bet_to_bb      |  1   | final bet-to amount in bb (0 for fold)                |
-| bet_frac_pot   |  1   | final bet-to as fraction of pre-bet pot (0 for fold)  |
-| pot_after_bb   |  1   | pot in bb *after* action                              |
-| stack_after_bb |  1   | our stack in bb *after* action                        |
-| is_all_in      |  1   | 1 if action would put us all-in                       |
-| is_raise       |  1   | 1 if action is a raise                                |
+| slice       | dims | meaning                                      |
+|-------------|------|----------------------------------------------|
+| action_type | 11   | pure one-hot over the 11 ActionType slots    |
 
-Total: **17 floats per legal action**. Scoring a decision builds a
-`(n_legal, 17)` tensor and the network processes each row alongside the same
-`x`.
+That's the entire row. Exactly one of the 11 floats is 1.0; the rest are 0.0.
+No state-dependent scalars. Scoring a decision builds an `(n_legal, 11)`
+tensor and the network processes each row alongside the same `x`.
 
-## Current-state vector `x` (745 floats)
+## Current-state vector `x` (732 floats)
 
-The vector has three regions: **static state** (121), **flat action history**
-(600 = 24 × 25), **history valid-mask** (24).
+Three regions: **static state** (121), **legal-actions mask** (11),
+**flat action history** (600 = 24 × 25). No external valid-mask block.
 
 ### Static state — offsets 0..120 (121 floats)
 
@@ -93,50 +108,51 @@ The vector has three regions: **static state** (121), **flat action history**
 | 119    | n_actions_this_street    |  1   | count, clipped to 6                                   |
 | 120    | street_first_to_act      |  1   | 1 if we're first to act this street                   |
 
-### Flat action history — offsets 121..720 (24 rows × 25 feat = 600 floats)
+### Legal-actions mask — offsets 121..131 (11 floats)
 
-Rows written **oldest-first**. Row `k` occupies offsets `121 + k*25 ..
-121 + (k+1)*25 - 1`. If the hand has fewer than 24 actions so far, unused rows
-are zero-padded and their valid-mask bit is 0.
+`x[121 + k] = 1.0` iff `ActionType(k)` is legal in the current state, else
+`0.0`. Mirrors `s.legal_actions_mask()`. Bit `k` corresponds to the same
+action index used everywhere else in the encoding.
+
+### Flat action history — offsets 132..731 (24 rows × 25 feat = 600 floats)
+
+Rows written **oldest-first**. Row `k` occupies offsets `132 + k*25 ..
+132 + (k+1)*25 - 1`. If the hand has fewer than 24 actions so far, unused
+rows are zero-padded — their `is_real` bit (offset 0 within the row) is 0.
 
 Each row's 25 floats:
 
 | within-row offset | dims | meaning                                                |
 |-------------------|------|--------------------------------------------------------|
-| 0–10              | 11   | action_type one-hot (same indexing as `a`)             |
-| 11                |  1   | bet_to_bb                                              |
-| 12                |  1   | bet_frac_pot (0 for fold/check)                        |
-| 13                |  1   | pot_after_bb                                           |
-| 14                |  1   | stack_after_bb (= 0 in history: actor's post-action stack is not tracked here) |
-| 15                |  1   | is_all_in (history: always 0; kept for layout parity)  |
-| 16                |  1   | is_raise                                               |
-| 17                |  1   | actor_was_us (1 if actor == current to_act player)     |
-| 18                |  1   | actor_was_villain (1 otherwise)                        |
-| 19–22             |  4   | street one-hot {preflop, flop, turn, river} at time of action |
-| 23                |  1   | pos_norm = k / 24 (row index normalized to [0, 1))     |
-| 24                |  1   | pad (reserved)                                         |
+| 0                 |  1   | **is_real** — 1.0 for populated row, 0.0 for padding   |
+| 1–11              | 11   | action_type one-hot (same indexing as `a`)             |
+| 12                |  1   | bet_to_bb                                              |
+| 13                |  1   | bet_frac_pot (vs pot BEFORE this action; 0 if pot==0)  |
+| 14                |  1   | pot_after_bb                                           |
+| 15                |  1   | stack_after_bb (actor's stack post-action, populated)  |
+| 16                |  1   | was_all_in (1 iff this action put the actor all-in)    |
+| 17                |  1   | is_raise                                               |
+| 18                |  1   | actor_was_us (1 if actor == current to_act player)     |
+| 19                |  1   | actor_was_villain (1 otherwise)                        |
+| 20–23             |  4   | street one-hot {preflop, flop, turn, river} at time of action |
+| 24                |  1   | pos_norm = k / 24 (row index normalized to [0, 1))     |
 
 Note: the actor one-hot is resolved **at observation time** — `was_us` is
 "were *you* the actor", i.e. `act.actor == state.to_act`. When the hand ends,
 `encode()` refuses to run (terminal states are never observed).
 
-### Valid-mask — offsets 721..744 (24 floats)
-
-`x[721 + k] = 1.0` if row `k` of the history contains a real action,
-else `0.0`. The MLP can use this to ignore zero-padded rows.
-
-**Total: 121 + 600 + 24 = 745 floats.** The offsets above are **load-bearing**.
+**Total: 121 + 11 + 600 = 732 floats.** The offsets above are **load-bearing**.
 
 ## Tensor shapes (Python side)
 
 ```python
-obs.x         : np.ndarray[shape=(745,),        dtype=float32]
-obs.a         : np.ndarray[shape=(n_legal, 17), dtype=float32]
+obs.x         : np.ndarray[shape=(732,),        dtype=float32]
+obs.a         : np.ndarray[shape=(n_legal, 11), dtype=float32]
 obs.legal     : list[ActionType] of length n_legal
 obs.legal_idx : np.ndarray[shape=(n_legal,),    dtype=int8]
 ```
 
-There is no `obs.z`.
+There is no `obs.z` and no separate valid-mask block.
 
 ## Parity test requirement
 

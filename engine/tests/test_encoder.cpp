@@ -1,23 +1,30 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "action.h"
-#include "card.h"
 #include "encoder.h"
 #include "game_hu.h"
 
 #include <algorithm>
 #include <array>
-#include <numeric>
 
 using namespace pt;
 
 namespace {
 
-int count_nonzero(const float* v, int n) {
-    int k = 0;
-    for (int i = 0; i < n; ++i) if (v[i] != 0.f) ++k;
-    return k;
-}
+// History-row offsets within a single HIST_FEAT-wide row (v0.3).
+// See encoder.cpp::encode_history_row for the canonical definition.
+constexpr int HOFF_IS_REAL      = 0;
+constexpr int HOFF_ACTION_ONEHOT= 1;   // bits 1..11
+constexpr int HOFF_BET_TO       = 12;
+constexpr int HOFF_BET_FRAC_POT = 13;
+constexpr int HOFF_POT_AFTER    = 14;
+constexpr int HOFF_STACK_AFTER  = 15;
+constexpr int HOFF_WAS_ALL_IN   = 16;
+constexpr int HOFF_IS_RAISE     = 17;
+constexpr int HOFF_ACTOR_US     = 18;
+constexpr int HOFF_ACTOR_VILL   = 19;
+constexpr int HOFF_STREET       = 20;   // bits 20..23
+constexpr int HOFF_POS_NORM     = 24;
 
 }  // namespace
 
@@ -68,58 +75,47 @@ TEST_CASE("Postflop position flips: SB becomes IP", "[encoder]") {
     REQUIRE(board_bits == 3);
 }
 
-TEST_CASE("Legal-action tensor has one row per legal action", "[encoder]") {
+TEST_CASE("Legal-actions mask block matches the legal action set", "[encoder]") {
+    const auto s = HUGame::deal(123);
+    const auto e = encode(s);
+    const auto legal = s.legal_actions();
+
+    // x[X_OFF_LEGAL_MASK + k] == 1.0 iff ActionType(k) is legal.
+    for (int k = 0; k < LEGAL_MASK_DIM; ++k) {
+        const bool legal_k = std::find(legal.begin(), legal.end(),
+                                       static_cast<ActionType>(k)) != legal.end();
+        const float bit = e.x[X_OFF_LEGAL_MASK + k];
+        REQUIRE(bit == (legal_k ? 1.f : 0.f));
+    }
+}
+
+TEST_CASE("a-rows are pure 11-dim one-hots", "[encoder]") {
     const auto s = HUGame::deal(123);
     const auto e = encode(s);
     const auto legal = s.legal_actions();
     REQUIRE(e.a.size() == legal.size());
     REQUIRE(e.legal == legal);
-    // Each row: exactly one action-type bit set in [0..NUM_ACTIONS-1].
-    for (const auto& row : e.a) {
+    // Each row: exactly one bit set (the action's slot), all others zero.
+    for (std::size_t i = 0; i < e.a.size(); ++i) {
+        const auto& row = e.a[i];
         int sum = 0;
-        for (int i = 0; i < NUM_ACTIONS; ++i) if (row[i] == 1.f) ++sum;
+        for (int k = 0; k < A_DIM; ++k) {
+            if (row[k] == 1.f) ++sum;
+            else REQUIRE(row[k] == 0.f);
+        }
         REQUIRE(sum == 1);
+        REQUIRE(row[static_cast<int>(legal[i])] == 1.f);
     }
 }
 
-TEST_CASE("FOLD action vector zeroes out chip-related fields", "[encoder]") {
-    auto s = HUGame::deal(9);
-    HUGame::step(s, ActionType::RAISE_100);    // SB raises so BB faces a bet
-    const auto e = encode(s);
-    // Find the row corresponding to FOLD.
-    const auto it = std::find(e.legal.begin(), e.legal.end(), ActionType::FOLD);
-    REQUIRE(it != e.legal.end());
-    const auto idx = std::distance(e.legal.begin(), it);
-    const auto& row = e.a[idx];
-    REQUIRE(row[static_cast<int>(ActionType::FOLD)] == 1.f);
-    REQUIRE(row[NUM_ACTIONS + 0] == 0.f);    // bet_to_bb
-    REQUIRE(row[NUM_ACTIONS + 1] == 0.f);    // bet_frac_pot
-    REQUIRE(row[NUM_ACTIONS + 5] == 0.f);    // is_raise
-}
-
-TEST_CASE("CHECK_CALL action vector tracks resulting stack and pot", "[encoder]") {
-    auto s = HUGame::deal(14);
-    HUGame::step(s, ActionType::RAISE_100);    // SB raises
-    const auto e = encode(s);                  // BB to act
-    const auto it = std::find(e.legal.begin(), e.legal.end(), ActionType::CHECK_CALL);
-    REQUIRE(it != e.legal.end());
-    const auto& row = e.a[std::distance(e.legal.begin(), it)];
-    REQUIRE(row[static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
-    // Calling matches SB's invested total; bet_to_bb > 1 (since SB bet ≥ 2bb).
-    REQUIRE(row[NUM_ACTIONS + 0] > 1.f);
-    // pot_after_bb > pot_bb of state.
-    REQUIRE(row[NUM_ACTIONS + 2] > e.x[110]);
-    REQUIRE(row[NUM_ACTIONS + 5] == 0.f);     // is_raise = 0 for call
-}
-
-TEST_CASE("Flat action history: oldest-first rows + valid-mask", "[encoder]") {
+TEST_CASE("History rows: oldest-first layout, is_real bit, action one-hot, "
+          "actor and street flags", "[encoder]") {
     auto s = HUGame::deal(21);
     // RAISE_100 (not RAISE_50) because at preflop-initial the 0.25/0.33/0.50
-    // fractions all snap to the min-raise-to of 2bb, so dedup admits only
-    // RAISE_25. RAISE_100 produces a distinct 3bb open.
-    HUGame::step(s, ActionType::RAISE_100);    // action #0: SB open
-    HUGame::step(s, ActionType::CHECK_CALL);   // action #1: BB call → flop
-    HUGame::step(s, ActionType::CHECK_CALL);   // action #2: BB checks flop
+    // fractions all snap to min-raise, so dedup admits only RAISE_25.
+    HUGame::step(s, ActionType::RAISE_100);    // #0 SB open
+    HUGame::step(s, ActionType::CHECK_CALL);   // #1 BB call → flop
+    HUGame::step(s, ActionType::CHECK_CALL);   // #2 BB checks flop
     REQUIRE(s.to_act == Player::SB);
 
     const auto e = encode(s);
@@ -127,31 +123,31 @@ TEST_CASE("Flat action history: oldest-first rows + valid-mask", "[encoder]") {
         return &e.x[X_OFF_HIST + k * HIST_FEAT];
     };
 
-    // Row 0 (oldest): SB's preflop raise. actor_was_us = true (SB to act now).
-    REQUIRE(row(0)[static_cast<int>(ActionType::RAISE_100)] == 1.f);
-    REQUIRE(row(0)[A_DIM + 0] == 1.f);        // was_us
-    REQUIRE(row(0)[A_DIM + 1] == 0.f);
-    REQUIRE(row(0)[A_DIM + 2] == 1.f);        // preflop (street one-hot [0])
-    REQUIRE(row(0)[A_DIM + 3] == 0.f);
-    REQUIRE(row(0)[A_DIM + 6] == 0.f);        // pos_norm = 0/24
+    // Row 0 (oldest): SB's preflop raise. Current to_act is SB → was_us = true.
+    REQUIRE(row(0)[HOFF_IS_REAL] == 1.f);
+    REQUIRE(row(0)[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
+    REQUIRE(row(0)[HOFF_IS_RAISE]    == 1.f);
+    REQUIRE(row(0)[HOFF_ACTOR_US]    == 1.f);
+    REQUIRE(row(0)[HOFF_ACTOR_VILL]  == 0.f);
+    REQUIRE(row(0)[HOFF_STREET + 0]  == 1.f);   // preflop
+    REQUIRE(row(0)[HOFF_POS_NORM]    == 0.f);
 
     // Row 1: BB's preflop call.
-    REQUIRE(row(1)[static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
-    REQUIRE(row(1)[A_DIM + 0] == 0.f);        // villain
-    REQUIRE(row(1)[A_DIM + 1] == 1.f);
-    REQUIRE(row(1)[A_DIM + 2] == 1.f);        // preflop
+    REQUIRE(row(1)[HOFF_IS_REAL] == 1.f);
+    REQUIRE(row(1)[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
+    REQUIRE(row(1)[HOFF_IS_RAISE]   == 0.f);
+    REQUIRE(row(1)[HOFF_ACTOR_US]   == 0.f);
+    REQUIRE(row(1)[HOFF_ACTOR_VILL] == 1.f);
+    REQUIRE(row(1)[HOFF_STREET + 0] == 1.f);   // preflop
 
     // Row 2: BB's flop check — most-recent real row.
-    REQUIRE(row(2)[static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
-    REQUIRE(row(2)[A_DIM + 0] == 0.f);
-    REQUIRE(row(2)[A_DIM + 1] == 1.f);
-    REQUIRE(row(2)[A_DIM + 3] == 1.f);        // flop (street one-hot [1])
+    REQUIRE(row(2)[HOFF_IS_REAL] == 1.f);
+    REQUIRE(row(2)[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
+    REQUIRE(row(2)[HOFF_ACTOR_US]   == 0.f);
+    REQUIRE(row(2)[HOFF_ACTOR_VILL] == 1.f);
+    REQUIRE(row(2)[HOFF_STREET + 1] == 1.f);   // flop
 
-    // Valid-mask: first 3 bits set, rest zero.
-    for (int k = 0; k < 3;         ++k) REQUIRE(e.x[X_OFF_VALID_MASK + k] == 1.f);
-    for (int k = 3; k < HIST_MAX;  ++k) REQUIRE(e.x[X_OFF_VALID_MASK + k] == 0.f);
-
-    // Rows 3..HIST_MAX-1 must be fully zero.
+    // Padded rows (3..HIST_MAX-1) must be all zero — including is_real.
     for (int k = 3; k < HIST_MAX; ++k) {
         for (int j = 0; j < HIST_FEAT; ++j) {
             REQUIRE(row(k)[j] == 0.f);
@@ -159,20 +155,36 @@ TEST_CASE("Flat action history: oldest-first rows + valid-mask", "[encoder]") {
     }
 }
 
+TEST_CASE("History rows: stack_after_bb and was_all_in are populated", "[encoder]") {
+    auto s = HUGame::deal(33);
+    HUGame::step(s, ActionType::ALL_IN);    // SB shoves all-in preflop
+    REQUIRE(s.to_act == Player::BB);
+
+    const auto e = encode(s);
+    const float* r0 = &e.x[X_OFF_HIST + 0 * HIST_FEAT];
+
+    // Row 0 records SB's all-in. Stack after = 0, was_all_in = 1.
+    REQUIRE(r0[HOFF_IS_REAL] == 1.f);
+    REQUIRE(r0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::ALL_IN)] == 1.f);
+    REQUIRE(r0[HOFF_STACK_AFTER] == 0.f);
+    REQUIRE(r0[HOFF_WAS_ALL_IN]  == 1.f);
+
+    // Sanity: bet_to_bb > 0 and pot_after_bb is non-trivial.
+    REQUIRE(r0[HOFF_BET_TO]    > 0.f);
+    REQUIRE(r0[HOFF_POT_AFTER] > 0.f);
+}
+
 TEST_CASE("pos_norm scales with row index", "[encoder]") {
     auto s = HUGame::deal(44);
-    // Build a preflop raise-war to get several history rows. First raise is
-    // RAISE_100 rather than RAISE_50 because on preflop-initial the 0.50
-    // fraction snaps to min-raise and dedup drops it (collides with RAISE_25).
     HUGame::step(s, ActionType::RAISE_100);   // #0 SB open
     HUGame::step(s, ActionType::RAISE_100);   // #1 BB 3bet
     HUGame::step(s, ActionType::RAISE_100);   // #2 SB 4bet
     const auto e = encode(s);
-    REQUIRE(e.x[X_OFF_HIST + 0 * HIST_FEAT + A_DIM + 6] ==
+    REQUIRE(e.x[X_OFF_HIST + 0 * HIST_FEAT + HOFF_POS_NORM] ==
             static_cast<float>(0) / static_cast<float>(HIST_MAX));
-    REQUIRE(e.x[X_OFF_HIST + 1 * HIST_FEAT + A_DIM + 6] ==
+    REQUIRE(e.x[X_OFF_HIST + 1 * HIST_FEAT + HOFF_POS_NORM] ==
             static_cast<float>(1) / static_cast<float>(HIST_MAX));
-    REQUIRE(e.x[X_OFF_HIST + 2 * HIST_FEAT + A_DIM + 6] ==
+    REQUIRE(e.x[X_OFF_HIST + 2 * HIST_FEAT + HOFF_POS_NORM] ==
             static_cast<float>(2) / static_cast<float>(HIST_MAX));
 }
 

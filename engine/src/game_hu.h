@@ -33,8 +33,10 @@ struct AppliedAction {
     Player actor;
     Street street;
     ActionType type;
-    int64_t bet_to_chips;     // absolute chip target at the moment of action (0 for fold/check)
-    int64_t pot_after_chips;  // total pot after action resolved
+    int64_t bet_to_chips;       // absolute chip target at the moment of action (0 for fold/check)
+    int64_t pot_after_chips;    // total pot after action resolved
+    int64_t stack_after_chips;  // actor's stack remaining after this action (0 if all-in)
+    bool was_all_in;            // true iff this action put the actor all-in
 };
 
 // HU NLHE game state. Chips are tracked in integer "chip units"; a big blind

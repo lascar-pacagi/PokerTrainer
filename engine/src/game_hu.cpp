@@ -282,6 +282,8 @@ void HUGame::step(HUState& s, ActionType action, const HandEvaluator* eval) {
             s.payoff_chips[li] = -matched;
             s.pot_chips = 0;
             rec.pot_after_chips = 0;
+            rec.stack_after_chips = s.stacks[pi];   // unchanged by fold
+            rec.was_all_in = false;                 // a fold cannot be all-in
             s.history.push_back(rec);
             return;
         }
@@ -329,6 +331,8 @@ void HUGame::step(HUState& s, ActionType action, const HandEvaluator* eval) {
     }
 
     rec.pot_after_chips = s.pot_chips;
+    rec.stack_after_chips = s.stacks[pi];
+    rec.was_all_in = s.all_in[pi];
     s.history.push_back(rec);
     s.actions_this_street += 1;
 
