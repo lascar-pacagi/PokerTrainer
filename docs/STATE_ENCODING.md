@@ -1,41 +1,28 @@
 # State Encoding Specification
 
-**Status:** v0.3 (flat-sequence layout, heads-up NLHE). Bit-identical outputs
-required from `engine/src/encoder.cpp` and `trainer/dmc/features.py`. Any
-change here requires updating both and running the parity tests in
-`engine/tests/test_encoder.cpp` and `trainer/tests/test_features_parity.py`.
+**Status:** v0.4 (fixed-position history, heads-up NLHE). Bit-identical
+outputs required from `engine/src/encoder.cpp` and any Python reproduction
+of the same encoding. Any change here requires updating both and re-running
+`engine/tests/test_encoder.cpp` and the trainer smokes.
 
-## What changed from v0.2
+## What changed from v0.3
 
-- **`a` rows are pure 11-dim action one-hots.** All 6 state-dependent
-  scalars (`bet_to_bb`, `bet_frac_pot`, `pot_after_bb`, `stack_after_bb`,
-  `is_all_in`, `is_raise`) are removed. Action representation no longer
-  varies by state — same action ⇒ same `a` row regardless of context.
-  `A_DIM` 17 → 11.
-- **State-level legal-actions mask added to `x`**: 11 bits at offset 121
-  showing which `ActionType` slots are legal in the current state.
-- **`is_real` inlined as bit 0 of every history row.** The previous
-  external 24-bit valid-mask block (positions 721–744) is removed; padded
-  rows distinguish themselves by being all-zero.
-- **History rows now populate `stack_after_bb` and `was_all_in` for
-  real.** Previously hard-zeroed (engine couldn't reconstruct without
-  full replay). `AppliedAction` was extended with `stack_after_chips`
-  and `was_all_in` fields, populated during `HUGame::step()`.
-- `STATIC_DIM` 121 → 132 (added 11-bit legal mask). `X_DIM` 745 → 732.
-  `HIST_FEAT` stays 25 (same width, different content).
-- **Rationale for 11-dim one-hot `a`**: the v0.2 design embedded
-  state-derived scalars in each row, which (a) made the same action have
-  different `a` vectors across states (the network had to *learn* the
-  equivalence class), (b) double-counted information already in `x`, and
-  (c) routed gradients for shared "what does this action mean" knowledge
-  through both the one-hot and scalar weights, smearing the
-  representation. Pure one-hots eliminate this.
-- **Rationale for the legal mask in `x`**: replaces the implicit
-  legality signal that v0.2 carried via `a`'s row count. Gives the
-  network a single, well-defined place to read "what is the action menu
-  in this state" — useful context for valuing any individual action
-  (e.g., a 75% raise means something different when ALL_IN is also
-  available vs. when it isn't).
+- **Action history is now partitioned into four fixed-position sub-blocks**:
+  preflop, flop, turn, river. Slot `k` of a sub-block always means "the
+  `k`th action of that street." A given row no longer mixes streets across
+  decision contexts. This lets the MLP's per-slot weights specialize cleanly
+  ("row k of the flop block" is one function, not a context-dependent
+  dispatch).
+- **Per-row street one-hot dropped** (slot index implies street).
+- **Per-row `pos_norm` dropped** (slot index implies position within the
+  street).
+- `HIST_FEAT` 25 → **20** (-5 floats per row).
+- `HIST_MAX` 24 → **34** (10 + 8 + 8 + 8 across streets).
+- `STATIC_DIM` 132 (unchanged). `X_DIM` 732 → **812**. `A_DIM` 11 (unchanged).
+- **Per-street action budgets** are sized comfortably above the empirical
+  worst case under uniform-random play (100k random hands → max
+  `[9, 7, 7, 6]` per street). If actual play ever exceeds a budget,
+  `encode()` throws — fail-fast, not silent truncation.
 
 ## Card index convention
 
@@ -83,10 +70,10 @@ That's the entire row. Exactly one of the 11 floats is 1.0; the rest are 0.0.
 No state-dependent scalars. Scoring a decision builds an `(n_legal, 11)`
 tensor and the network processes each row alongside the same `x`.
 
-## Current-state vector `x` (732 floats)
+## Current-state vector `x` (812 floats)
 
 Three regions: **static state** (121), **legal-actions mask** (11),
-**flat action history** (600 = 24 × 25). No external valid-mask block.
+**fixed-position action history** (680 = 34 × 20).
 
 ### Static state — offsets 0..120 (121 floats)
 
@@ -114,13 +101,32 @@ Three regions: **static state** (121), **legal-actions mask** (11),
 `0.0`. Mirrors `s.legal_actions_mask()`. Bit `k` corresponds to the same
 action index used everywhere else in the encoding.
 
-### Flat action history — offsets 132..731 (24 rows × 25 feat = 600 floats)
+### Fixed-position action history — offsets 132..811 (34 rows × 20 feat = 680 floats)
 
-Rows written **oldest-first**. Row `k` occupies offsets `132 + k*25 ..
-132 + (k+1)*25 - 1`. If the hand has fewer than 24 actions so far, unused
-rows are zero-padded — their `is_real` bit (offset 0 within the row) is 0.
+The history block is partitioned into four contiguous per-street sub-blocks:
 
-Each row's 25 floats:
+| street  | slot count | start offset | end offset (exclusive) |
+|---------|-----------:|-------------:|-----------------------:|
+| preflop |         10 |          132 |                    332 |
+| flop    |          8 |          332 |                    492 |
+| turn    |          8 |          492 |                    652 |
+| river   |          8 |          652 |                    812 |
+
+Within a sub-block, slot `k` is filled by the `k`th action of that street
+(oldest first, slot 0 = first action of the street). Slot positions ARE
+deterministic — slot 3 of the flop block is always "the 4th flop action,"
+never anything else.
+
+If a street has fewer actions than its slot budget, the trailing slots are
+zero-padded; their `is_real` bit (offset 0 within the row) is 0.
+
+If a street has *more* actions than its slot budget, `encode()` throws
+`std::runtime_error` rather than silently truncating. Budgets were sized to
+cover the empirical worst case under uniform-random play (100k hands → max
+`[9, 7, 7, 6]`); trained policies pick larger raises and produce shorter
+sequences, so the throw should never fire in practice.
+
+Each row's 20 floats:
 
 | within-row offset | dims | meaning                                                |
 |-------------------|------|--------------------------------------------------------|
@@ -134,37 +140,34 @@ Each row's 25 floats:
 | 17                |  1   | is_raise                                               |
 | 18                |  1   | actor_was_us (1 if actor == current to_act player)     |
 | 19                |  1   | actor_was_villain (1 otherwise)                        |
-| 20–23             |  4   | street one-hot {preflop, flop, turn, river} at time of action |
-| 24                |  1   | pos_norm = k / 24 (row index normalized to [0, 1))     |
+
+Removed vs v0.3: per-row street one-hot (slot implies street under fixed
+slots) and `pos_norm` (slot implies position within street).
 
 Note: the actor one-hot is resolved **at observation time** — `was_us` is
 "were *you* the actor", i.e. `act.actor == state.to_act`. When the hand ends,
 `encode()` refuses to run (terminal states are never observed).
 
-**Total: 121 + 11 + 600 = 732 floats.** The offsets above are **load-bearing**.
+**Total: 121 + 11 + 680 = 812 floats.** The offsets above are **load-bearing**.
 
 ## Tensor shapes (Python side)
 
 ```python
-obs.x         : np.ndarray[shape=(732,),        dtype=float32]
+obs.x         : np.ndarray[shape=(812,),        dtype=float32]
 obs.a         : np.ndarray[shape=(n_legal, 11), dtype=float32]
 obs.legal     : list[ActionType] of length n_legal
 obs.legal_idx : np.ndarray[shape=(n_legal,),    dtype=int8]
 ```
 
-There is no `obs.z` and no separate valid-mask block.
+Module-level constants (`pokertrainer_engine`):
 
-## Parity test requirement
+```
+X_DIM, A_DIM, HIST_MAX, HIST_FEAT, STATIC_DIM, LEGAL_MASK_DIM, NUM_ACTIONS,
+X_OFF_LEGAL_MASK, X_OFF_PREFLOP, X_OFF_FLOP, X_OFF_TURN, X_OFF_RIVER,
+PREFLOP_SLOTS, FLOP_SLOTS, TURN_SLOTS, RIVER_SLOTS,
+STREET_SLOTS = (10, 8, 8, 8),
+STREET_OFFSETS = (X_OFF_PREFLOP, X_OFF_FLOP, X_OFF_TURN, X_OFF_RIVER),
+```
 
-`engine/tests/test_encoder.cpp` and `trainer/tests/test_features_parity.py`
-must independently produce byte-identical `x` and `a` for a fixed corpus of
-hand-rolled fixtures covering:
-
-1. Dealt preflop, OOP to act, no prior action.
-2. 3-bet preflop spot, IP to act.
-3. Flopped set on a wet board, OOP c-bet + raise + reraise sequence.
-4. Turn all-in shove by IP.
-5. River check-check going to showdown.
-
-Fixtures stored as JSON in `engine/tests/fixtures/encoder/*.json`; both
-languages load and compare byte-for-byte.
+C ABI exposes the same via `pt_x_dim()` / `pt_hist_max()` / `pt_hist_feat()` /
+`pt_x_off_street(street)` / `pt_street_slots(street)`.

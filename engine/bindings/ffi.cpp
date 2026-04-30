@@ -65,6 +65,22 @@ int32_t pt_x_dim(void)       { return pt::X_DIM;       }
 int32_t pt_a_dim(void)       { return pt::A_DIM;       }
 int32_t pt_num_actions(void) { return pt::NUM_ACTIONS; }
 int32_t pt_hist_max(void)    { return pt::HIST_MAX;    }
+int32_t pt_hist_feat(void)   { return pt::HIST_FEAT;   }
+
+// Per-street history sub-block introspection (v0.4 fixed-position layout).
+// `street` is 0=PREFLOP, 1=FLOP, 2=TURN, 3=RIVER. Returns the within-x offset
+// where that street's row block starts (negative on out-of-range street).
+int32_t pt_x_off_street(int32_t street) {
+    if (street < 0 || street >= 4) return -1;
+    return pt::STREET_OFFSETS[street];
+}
+
+// How many history rows are reserved for `street` (the slot budget). Returns
+// -1 on out-of-range street.
+int32_t pt_street_slots(int32_t street) {
+    if (street < 0 || street >= 4) return -1;
+    return pt::STREET_SLOTS[street];
+}
 
 // ─── Card helpers (kept from Phase-0 stub for cross-checking) ───────────────
 int32_t pt_card_to_string(uint8_t card, char* out, int32_t out_cap) {

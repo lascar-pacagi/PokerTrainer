@@ -1,7 +1,7 @@
 """Circular replay buffer for DMC transitions.
 
-Flat-sequence encoding (v0.2): each transition stores:
-    x  — state vector (X_DIM,)         float32   # includes flat action history
+Encoding v0.4: each transition stores:
+    x  — state vector (X_DIM,)         float32   # includes fixed-position action history
     a  — taken action feature (A_DIM,) float32
     r  — terminal Monte-Carlo return, in BB (scalar float32)
 

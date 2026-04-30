@@ -1,4 +1,4 @@
-"""End-to-end smoke test for the DMC loop (flat-sequence encoding, v0.2).
+"""End-to-end smoke test for the DMC loop (fixed-position encoding, v0.4).
 
 Runs a tiny rollout → buffer → gradient-step cycle and checks that:
   * transitions were produced and stored,
@@ -68,11 +68,13 @@ def main() -> None:
     assert float(np.max(np.abs(buf.r[:len(buf)]))) <= 200.0, \
         f"reward magnitude too big: {np.max(np.abs(buf.r[:len(buf)]))}"
 
-    # Sanity check (v0.3): is_real bit at offset 0 of each history row tells
-    # us how many rows are populated. Each transition happens at least one
-    # action into the hand for the non-first-actor, so most sampled x's have
-    # at least one populated row; the bound is HIST_MAX.
-    is_real_col_offsets = pte.X_OFF_HIST + np.arange(pte.HIST_MAX) * pte.HIST_FEAT
+    # Sanity check (v0.4): is_real bit at offset 0 of each history row tells
+    # us how many rows are populated. The history is split across four
+    # per-street sub-blocks; concatenate their is_real columns to count.
+    is_real_col_offsets = np.concatenate([
+        off + np.arange(slots) * pte.HIST_FEAT
+        for off, slots in zip(pte.STREET_OFFSETS, pte.STREET_SLOTS)
+    ])
     any_valid = buf.x[:len(buf), is_real_col_offsets].sum(axis=1)
     assert (any_valid >= 0).all() and any_valid.max() <= pte.HIST_MAX
 

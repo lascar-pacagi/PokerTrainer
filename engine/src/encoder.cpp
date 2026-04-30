@@ -14,7 +14,7 @@ inline float bb(int64_t chips) {
 }  // anonymous namespace
 
 void encode_action_vector(float* out, ActionType a) {
-    // v0.3: pure A_DIM=11 one-hot. No state-dependent scalars.
+    // Pure A_DIM=11 one-hot. No state-dependent scalars.
     for (int i = 0; i < A_DIM; ++i) out[i] = 0.f;
     out[static_cast<int>(a)] = 1.f;
 }
@@ -22,9 +22,8 @@ void encode_action_vector(float* out, ActionType a) {
 void encode_history_row(float* out,
                         const AppliedAction& act,
                         int64_t pot_before_chips,
-                        bool actor_was_us,
-                        int row_idx) {
-    // v0.3 layout (HIST_FEAT = 25):
+                        bool actor_was_us) {
+    // v0.4 layout (HIST_FEAT = 20):
     //   [0]      is_real (1.0 — bit 0 of every populated row)
     //   [1..11]  action one-hot (NUM_ACTIONS slots)
     //   [12]     bet_to_bb
@@ -34,8 +33,9 @@ void encode_history_row(float* out,
     //   [16]     was_all_in
     //   [17]     is_raise
     //   [18..19] actor flags (us / villain) relative to current to_act
-    //   [20..23] street one-hot (PREFLOP/FLOP/TURN/RIVER)
-    //   [24]     pos_norm (row_idx / HIST_MAX)
+    //
+    // Removed vs v0.3: per-row street one-hot (slot implies street under
+    // fixed-position layout) and pos_norm (slot implies position).
     for (int i = 0; i < HIST_FEAT; ++i) out[i] = 0.f;
 
     out[0] = 1.f;
@@ -53,10 +53,6 @@ void encode_history_row(float* out,
 
     out[18] = actor_was_us ? 1.f : 0.f;
     out[19] = actor_was_us ? 0.f : 1.f;
-
-    out[20 + static_cast<int>(act.street)] = 1.f;
-
-    out[24] = static_cast<float>(row_idx) / static_cast<float>(HIST_MAX);
 }
 
 EncodedState encode(const HUState& s) {
@@ -121,22 +117,43 @@ EncodedState encode(const HUState& s) {
         encode_action_vector(e.a[i].data(), e.legal[i]);
     }
 
-    // ─── flat action history (oldest-first) ─────────────────────────────────
-    // Rows written at x[X_OFF_HIST + k*HIST_FEAT]. Bit 0 of each populated
-    // row is `is_real = 1`; padded rows stay all-zero with is_real = 0,
-    // which is how the network distinguishes real vs padding under v0.3
-    // (no separate valid-mask block).
+    // ─── fixed-position action history ──────────────────────────────────────
+    // Each action is written into its street's sub-block at the per-street
+    // counter offset. Slot k of street s ALWAYS means "the kth action of
+    // street s" — no chronological mixing across streets.
+    //
+    // Padded slots (within a sub-block, after that street's last real action)
+    // stay all-zero — is_real = 0 distinguishes them.
+    //
+    // Budget-overflow path: if any street has more actions than its slot
+    // budget allows, throw. Fail-fast so a wrong budget assumption surfaces
+    // immediately rather than silently dropping rows.
     const int64_t blinds_pot = HUState::SMALL_BLIND_CHIPS + HUState::BIG_BLIND_CHIPS;
-    const int hist_n = static_cast<int>(s.history.size());
-    const int start  = std::max(0, hist_n - HIST_MAX);
-    const int take   = hist_n - start;
-    for (int k = 0; k < take; ++k) {
-        const int j = start + k;
+    std::array<int, 4> per_street_count = {0, 0, 0, 0};
+
+    for (std::size_t j = 0; j < s.history.size(); ++j) {
         const AppliedAction& act = s.history[j];
+        const int street_idx = static_cast<int>(act.street);
+        if (street_idx < 0 || street_idx >= 4) {
+            throw std::runtime_error("encode(): history action has invalid street");
+        }
+
+        const int slot = per_street_count[street_idx];
+        if (slot >= STREET_SLOTS[street_idx]) {
+            throw std::runtime_error(
+                "encode(): per-street action budget exceeded — bump the "
+                "relevant *_SLOTS constant in encoder.h (street=" +
+                std::to_string(street_idx) + ", slot=" +
+                std::to_string(slot) + ", history_size=" +
+                std::to_string(s.history.size()) + ")");
+        }
+
         const int64_t pot_before = (j == 0) ? blinds_pot : s.history[j - 1].pot_after_chips;
-        float* row = &x[X_OFF_HIST + k * HIST_FEAT];
+        float* row = &x[STREET_OFFSETS[street_idx] + slot * HIST_FEAT];
         const bool actor_was_us = (act.actor == s.to_act);
-        encode_history_row(row, act, pot_before, actor_was_us, k);
+        encode_history_row(row, act, pot_before, actor_was_us);
+
+        per_street_count[street_idx] = slot + 1;
     }
 
     return e;

@@ -11,11 +11,12 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelConfig:
-    # Flat-sequence encoding (v0.3 — see docs/STATE_ENCODING.md).
-    # x carries chip-state scalars + an 11-bit legal-actions mask + the flat
-    # action history (each row's bit 0 = is_real). a-rows are pure 11-dim
-    # one-hots — no scalar features.
-    x_dim: int = 732         # must match engine X_DIM
+    # Fixed-position encoding (v0.4 — see docs/STATE_ENCODING.md).
+    # x carries chip-state scalars + an 11-bit legal-actions mask + the
+    # action history split into four contiguous per-street sub-blocks
+    # (preflop / flop / turn / river). Each row's bit 0 = is_real.
+    # a-rows are pure 11-dim one-hots — no scalar features.
+    x_dim: int = 812         # must match engine X_DIM
     a_dim: int = 11          # must match engine A_DIM
     mlp_hidden: int = 512
     mlp_layers: int = 5

@@ -9,10 +9,11 @@
 //   - StepResult                             (done, just_acted, reward_bb)
 //   - Env                                    (reset, step, observation, payoffs_bb)
 //
-// Tensor contract (must match docs/STATE_ENCODING.md, encoding v0.3):
-//   obs.x : float32 ndarray shape (X_DIM,) = (732,)
-//            — chip-state scalars + 11-bit legal-actions mask + flat action
-//              history (each row's bit 0 = is_real). No external valid-mask.
+// Tensor contract (must match docs/STATE_ENCODING.md, encoding v0.4):
+//   obs.x : float32 ndarray shape (X_DIM,) = (652,)
+//            — chip-state scalars + 11-bit legal-actions mask + fixed-position
+//              action history (4 sub-blocks: preflop/flop/turn/river). Each
+//              row's bit 0 = is_real.
 //   obs.a : float32 ndarray shape (n_legal, A_DIM) = (n_legal, 11)
 //            — pure action one-hot rows (one 1.0 per row, no scalars).
 //   obs.legal : list[ActionType] of length n_legal
@@ -70,7 +71,20 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
     m.attr("STATIC_DIM")        = pt::STATIC_DIM;
     m.attr("LEGAL_MASK_DIM")    = pt::LEGAL_MASK_DIM;
     m.attr("X_OFF_LEGAL_MASK")  = pt::X_OFF_LEGAL_MASK;
-    m.attr("X_OFF_HIST")        = pt::X_OFF_HIST;
+    m.attr("X_OFF_PREFLOP")     = pt::X_OFF_PREFLOP;
+    m.attr("X_OFF_FLOP")        = pt::X_OFF_FLOP;
+    m.attr("X_OFF_TURN")        = pt::X_OFF_TURN;
+    m.attr("X_OFF_RIVER")       = pt::X_OFF_RIVER;
+    m.attr("PREFLOP_SLOTS")     = pt::PREFLOP_SLOTS;
+    m.attr("FLOP_SLOTS")        = pt::FLOP_SLOTS;
+    m.attr("TURN_SLOTS")        = pt::TURN_SLOTS;
+    m.attr("RIVER_SLOTS")       = pt::RIVER_SLOTS;
+    // STREET_SLOTS / STREET_OFFSETS as Python tuples for callers that want
+    // index-by-street access without selecting per-name attrs.
+    m.attr("STREET_SLOTS") = py::make_tuple(
+        pt::PREFLOP_SLOTS, pt::FLOP_SLOTS, pt::TURN_SLOTS, pt::RIVER_SLOTS);
+    m.attr("STREET_OFFSETS") = py::make_tuple(
+        pt::X_OFF_PREFLOP, pt::X_OFF_FLOP, pt::X_OFF_TURN, pt::X_OFF_RIVER);
     m.attr("NUM_ACTIONS")       = pt::NUM_ACTIONS;
     m.attr("NUM_PLAYERS")    = pt::NUM_PLAYERS;
     m.attr("BIG_BLIND_CHIPS")   = pt::HUState::BIG_BLIND_CHIPS;

@@ -19,7 +19,7 @@ What's checked, per hand:
       - each `a[i, 0:11]` is a clean one-hot.
       - `legal_idx[i] == int(legal[i])`.
   * No duplicate cards across hole+board (Fisher-Yates correctness).
-  * Hand terminates within HIST_MAX (24) decision points.
+  * Hand terminates within HIST_MAX (26) decision points.
   * After step on terminal, observation() throws.
   * `step(legal_idx)` for an out-of-range idx throws.
 
@@ -136,7 +136,7 @@ def play_one_hand(t: TestState, hand_seed: int) -> None:
 
     decisions = 0
     while not env.is_terminal():
-        # Cap to detect runaway loops (HIST_MAX is 24).
+        # Cap to detect runaway loops (HIST_MAX is 26).
         t.check(decisions <= 50,
                 f"seed={hand_seed:#x}: hand terminated within 50 decisions")
         if decisions > 50:

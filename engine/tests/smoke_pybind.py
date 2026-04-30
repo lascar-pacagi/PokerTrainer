@@ -12,15 +12,20 @@ import pokertrainer_engine as pte
 print(f"module version check — X_DIM={pte.X_DIM}, A_DIM={pte.A_DIM}, "
       f"HIST_MAX={pte.HIST_MAX}, HIST_FEAT={pte.HIST_FEAT}, "
       f"NUM_ACTIONS={pte.NUM_ACTIONS}")
-assert pte.X_DIM == 732
+assert pte.X_DIM == 812
 assert pte.A_DIM == 11
-assert pte.HIST_MAX == 24
-assert pte.HIST_FEAT == 25
+assert pte.HIST_MAX == 34
+assert pte.HIST_FEAT == 20
 assert pte.NUM_ACTIONS == 11
 assert pte.STATIC_DIM == 132
 assert pte.LEGAL_MASK_DIM == 11
 assert pte.X_OFF_LEGAL_MASK == 121
-assert pte.X_OFF_HIST == 132
+assert pte.X_OFF_PREFLOP == 132
+assert pte.X_OFF_FLOP    == 132 + 10 * pte.HIST_FEAT
+assert pte.X_OFF_TURN    == pte.X_OFF_FLOP + 8 * pte.HIST_FEAT
+assert pte.X_OFF_RIVER   == pte.X_OFF_TURN + 8 * pte.HIST_FEAT
+assert pte.STREET_SLOTS   == (10, 8, 8, 8)
+assert pte.STREET_OFFSETS == (pte.X_OFF_PREFLOP, pte.X_OFF_FLOP, pte.X_OFF_TURN, pte.X_OFF_RIVER)
 
 # One complete hand: check-call all the way to showdown.
 env = pte.Env(seed=2026)
@@ -34,12 +39,18 @@ while not env.is_terminal():
     assert obs.x.shape == (pte.X_DIM,) and obs.x.dtype == np.float32
     assert obs.a.shape == (len(obs.legal), pte.A_DIM)
     assert obs.legal_idx.shape == (len(obs.legal),)
-    # is_real bit at offset 0 of each history row counts populated rows,
-    # saturating at HIST_MAX. Reads each row's first entry directly.
-    is_real_offsets = pte.X_OFF_HIST + np.arange(pte.HIST_MAX) * pte.HIST_FEAT
-    n_valid = int(obs.x[is_real_offsets].sum())
+    # Fixed-position history: the count of populated rows in each street's
+    # sub-block must equal the count of history actions on that street so
+    # far. Sum across sub-blocks equals total history size (bounded by the
+    # per-street slot budgets, which we never exceed in this smoke).
+    n_real_per_street = []
+    for street_idx, off in enumerate(pte.STREET_OFFSETS):
+        slots = pte.STREET_SLOTS[street_idx]
+        is_real_offsets = off + np.arange(slots) * pte.HIST_FEAT
+        n_real_per_street.append(int(obs.x[is_real_offsets].sum()))
+    n_real_total = sum(n_real_per_street)
     hist_n = env.state().history_size
-    assert n_valid == min(hist_n, pte.HIST_MAX), (n_valid, hist_n)
+    assert n_real_total == hist_n, (n_real_per_street, hist_n)
 
     # Legal-actions mask block matches the legal list.
     legal_set = {int(a) for a in obs.legal}

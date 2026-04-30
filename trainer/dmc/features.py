@@ -1,9 +1,10 @@
 """Bridge between pokertrainer_engine (C++) and PyTorch tensors.
 
-The engine returns numpy float32 arrays via pybind11 (encoding v0.3):
+The engine returns numpy float32 arrays via pybind11 (encoding v0.4):
     obs.x : (X_DIM,)            float32   # chip-state scalars + 11-bit legal-actions
-                                          # mask + flat action history (each row's
-                                          # bit 0 = is_real). No external valid-mask.
+                                          # mask + fixed-position action history
+                                          # (4 contiguous sub-blocks indexed by
+                                          # street; each row's bit 0 = is_real).
     obs.a : (n_legal, A_DIM)    float32   # pure 11-dim action one-hots, one row per
                                           # legal action.
     obs.legal_idx : (n_legal,)  int8      # ActionType indices in 0..NUM_ACTIONS-1.
