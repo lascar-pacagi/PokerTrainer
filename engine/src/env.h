@@ -56,6 +56,15 @@ public:
     StepResult step_action(ActionType a);
 
     const HUState& state() const { return state_; }
+
+    // Mutable view of the underlying HUState, intended for synthetic spot
+    // construction (overwriting hole/board cards from a UI). Use with care:
+    // mutating chip-tracking fields or the action history will desync the
+    // RNG-deal-then-replay invariants. The inspector use case overwrites
+    // cards immediately after a fresh reset() and before the first step,
+    // which is safe.
+    HUState& mutable_state() { return state_; }
+
     bool is_terminal() const { return state_.is_terminal(); }
     Player to_act() const { return state_.to_act; }
 
