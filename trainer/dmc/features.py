@@ -1,9 +1,12 @@
 """Bridge between pokertrainer_engine (C++) and PyTorch tensors.
 
-The engine returns numpy float32 arrays via pybind11:
-    obs.x : (X_DIM,)            float32   # includes flat action history + valid-mask
-    obs.a : (n_legal, A_DIM)    float32
-    obs.legal_idx : (n_legal,)  int8  — ActionType indices in 0..9
+The engine returns numpy float32 arrays via pybind11 (encoding v0.3):
+    obs.x : (X_DIM,)            float32   # chip-state scalars + 11-bit legal-actions
+                                          # mask + flat action history (each row's
+                                          # bit 0 = is_real). No external valid-mask.
+    obs.a : (n_legal, A_DIM)    float32   # pure 11-dim action one-hots, one row per
+                                          # legal action.
+    obs.legal_idx : (n_legal,)  int8      # ActionType indices in 0..NUM_ACTIONS-1.
 
 This module keeps engine ⇆ torch conversions in one place so the rest of the
 DMC code stays agnostic to where the numpy arrays came from.
