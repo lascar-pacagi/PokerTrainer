@@ -90,7 +90,7 @@ enum Terminal {
 
 /// Card index convention (matches engine/src/card.h):
 ///   card = rank * 4 + suit, range [0, 52). 0xFF = NO_CARD.
-class Card {
+class EngineCard {
   static const int noCard   = 0xFF;
   static const int numRanks = 13;
   static const int numSuits = 4;

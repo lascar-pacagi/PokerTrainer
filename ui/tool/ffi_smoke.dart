@@ -8,6 +8,9 @@
 ///   POKERTRAINER_SO=/path/to/libpokertrainer.so dart run tool/ffi_smoke.dart
 library;
 
+// CLI tool: print() is the entire UX.
+// ignore_for_file: avoid_print
+
 import 'package:pokertrainer_ui/ffi/actions.dart';
 import 'package:pokertrainer_ui/ffi/engine.dart';
 
@@ -51,24 +54,24 @@ void main() {
 
     // ─── 3. Hand-pick cards ──────────────────────────────────────────────
     env.clearCards();
-    env.setHole(Player.sb, Card.parse('As'), Card.parse('Kh'));
-    env.setHole(Player.bb, Card.parse('Qd'), Card.parse('Qc'));
+    env.setHole(Player.sb, EngineCard.parse('As'), EngineCard.parse('Kh'));
+    env.setHole(Player.bb, EngineCard.parse('Qd'), EngineCard.parse('Qc'));
     env.setBoard([
-      Card.parse('2s'), Card.parse('7d'), Card.parse('Tc'),
-      Card.noCard, Card.noCard,
+      EngineCard.parse('2s'), EngineCard.parse('7d'), EngineCard.parse('Tc'),
+      EngineCard.noCard, EngineCard.noCard,
     ]);
     final sbHole = env.getHole(Player.sb);
     final bbHole = env.getHole(Player.bb);
     final board  = env.getBoard();
-    print('after override: SB=${sbHole.map(Card.toReadable).join(" ")} '
-        'BB=${bbHole.map(Card.toReadable).join(" ")} '
-        'board=${board.map(Card.toReadable).join(" ")}');
-    assert(sbHole[0] == Card.parse('As'));
+    print('after override: SB=${sbHole.map(EngineCard.toReadable).join(" ")} '
+        'BB=${bbHole.map(EngineCard.toReadable).join(" ")} '
+        'board=${board.map(EngineCard.toReadable).join(" ")}');
+    assert(sbHole[0] == EngineCard.parse('As'));
 
     // Uniqueness rejection.
     bool threw = false;
     try {
-      env.setHole(Player.bb, Card.parse('As'), Card.parse('5h'));
+      env.setHole(Player.bb, EngineCard.parse('As'), EngineCard.parse('5h'));
     } catch (_) { threw = true; }
     assert(threw, 'expected duplicate-card rejection');
 

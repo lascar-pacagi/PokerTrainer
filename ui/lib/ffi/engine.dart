@@ -378,7 +378,7 @@ class EnvHandle {
     final rc = engine.native.ptEnvSetHole(_ptr, player.index, c0, c1);
     if (rc != 0) {
       throw StateError(
-          'pt_env_set_hole rejected (${Card.toReadable(c0)} ${Card.toReadable(c1)}) — '
+          'pt_env_set_hole rejected (${EngineCard.toReadable(c0)} ${EngineCard.toReadable(c1)}) — '
           'duplicate against existing dealt cards?');
     }
   }
@@ -391,7 +391,9 @@ class EnvHandle {
     _checkAlive();
     final p = malloc<ffi.Uint8>(5);
     try {
-      for (int i = 0; i < 5; i++) p[i] = cards5[i];
+      for (int i = 0; i < 5; i++) {
+        p[i] = cards5[i];
+      }
       final rc = engine.native.ptEnvSetBoard(_ptr, p);
       if (rc != 0) {
         throw StateError('pt_env_set_board rejected — duplicate cards?');

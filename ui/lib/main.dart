@@ -1,122 +1,201 @@
+/// PokerTrainer interactive policy inspector — entry point.
+///
+/// Loads libpokertrainer.so + initializes hand-eval tables, then opens the
+/// inspector window. One GameSession lives at the root and feeds every
+/// screen widget via ChangeNotifier ticks.
+library;
+
 import 'package:flutter/material.dart';
 
+import 'ffi/engine.dart';
+import 'game/game_session.dart';
+import 'widgets/action_bar.dart';
+import 'widgets/history_strip.dart';
+import 'widgets/table_view.dart';
+
 void main() {
-  runApp(const MyApp());
+  // Lazy: errors here surface as a red screen, which is fine for dev.
+  final engine = PokerEngine.init();
+  runApp(InspectorApp(engine: engine));
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class InspectorApp extends StatelessWidget {
+  final PokerEngine engine;
+  const InspectorApp({super.key, required this.engine});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'PokerTrainer · HU NLHE Inspector',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF0B0F0D),
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF2D5B7C),
+          brightness: Brightness.dark,
+        ),
+        textTheme: Typography.whiteMountainView,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: InspectorHome(engine: engine),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class InspectorHome extends StatefulWidget {
+  final PokerEngine engine;
+  const InspectorHome({super.key, required this.engine});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<InspectorHome> createState() => _InspectorHomeState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _InspectorHomeState extends State<InspectorHome> {
+  late final GameSession _session;
+  bool _revealAllHoles = true;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  @override
+  void initState() {
+    super.initState();
+    _session = GameSession(widget.engine);
+  }
+
+  @override
+  void dispose() {
+    _session.dispose();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
-    return Scaffold(
-      appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
-      ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
-          children: [
-            const Text('You have pushed the button this many times:'),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+    return AnimatedBuilder(
+      animation: _session,
+      builder: (context, _) => Scaffold(
+        body: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _topBar(),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: Center(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 720),
+                            child: TableView(
+                              session: _session,
+                              revealAllHoles: _revealAllHoles,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 720),
+                            child: ActionBar(session: _session),
+                          ),
+                          const SizedBox(height: 16),
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 720),
+                            child: HistoryStrip(history: _session.history),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
+    );
+  }
+
+  Widget _topBar() {
+    final seedTxt = _session.currentSeed == null
+        ? '—'
+        : '0x${_session.currentSeed!.toRadixString(16).padLeft(8, "0")}';
+    return Row(
+      children: [
+        Text(
+          'PokerTrainer Inspector',
+          style: Theme.of(context).textTheme.titleLarge?.copyWith(
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.4,
+          ),
+        ),
+        const SizedBox(width: 18),
+        Text(
+          'Hand #${_session.handCount}  ·  seed $seedTxt',
+          style: const TextStyle(
+            color: Color(0xAAEAE6D9),
+            fontFamily: 'monospace',
+            fontSize: 12,
+          ),
+        ),
+        const Spacer(),
+        IconButton(
+          tooltip: _revealAllHoles ? 'Hide opponent cards' : 'Reveal all holes',
+          icon: Icon(_revealAllHoles ? Icons.visibility : Icons.visibility_off),
+          onPressed: () => setState(() => _revealAllHoles = !_revealAllHoles),
+        ),
+        const SizedBox(width: 6),
+        FilledButton.icon(
+          icon: const Icon(Icons.shuffle, size: 18),
+          label: const Text('Deal random'),
+          onPressed: _session.dealRandom,
+        ),
+        const SizedBox(width: 8),
+        FilledButton.tonalIcon(
+          icon: const Icon(Icons.replay, size: 18),
+          label: const Text('Re-seed'),
+          onPressed: _showSeedDialog,
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showSeedDialog() async {
+    final controller = TextEditingController(
+      text: (_session.currentSeed ?? 0xC0FFEE).toRadixString(16),
+    );
+    final v = await showDialog<int?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Deal from hex seed'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            prefixText: '0x',
+            hintText: 'c0ffee',
+          ),
+          style: const TextStyle(fontFamily: 'monospace'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              try {
+                final seed = int.parse(controller.text.trim(), radix: 16);
+                Navigator.pop(ctx, seed);
+              } catch (_) {
+                Navigator.pop(ctx, null);
+              }
+            },
+            child: const Text('Deal'),
+          ),
+        ],
       ),
     );
+    if (v != null) _session.dealWithSeed(v);
   }
 }

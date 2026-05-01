@@ -1,30 +1,35 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+/// Widget tests for the inspector. The full app needs libpokertrainer.so
+/// loaded, which is awkward in `flutter test` (no controlled .so path), so
+/// most live-engine coverage lives in tool/ffi_smoke.dart instead.
+library;
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:pokertrainer_ui/main.dart';
+import 'package:pokertrainer_ui/ffi/actions.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  test('Card encoding round-trips through engine convention', () {
+    expect(EngineCard.parse('As'), equals(EngineCard.make(12, 3)));
+    expect(EngineCard.parse('2c'), equals(EngineCard.make(0, 0)));
+    expect(EngineCard.toReadable(EngineCard.parse('Th')), equals('Th'));
+    expect(EngineCard.toReadable(EngineCard.noCard), equals('--'));
+  });
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+  test('ActionType ordinals match the engine enum', () {
+    expect(ActionType.fold.index,      0);
+    expect(ActionType.checkCall.index, 1);
+    expect(ActionType.raise25.index,   2);
+    expect(ActionType.allIn.index,     10);
+    expect(ActionType.numActions,      11);
+  });
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
-
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+  test('Player and Street ordinals match', () {
+    expect(Player.sb.index, 0);
+    expect(Player.bb.index, 1);
+    expect(Street.preflop.index,  0);
+    expect(Street.river.index,    3);
+    expect(Street.showdown.index, 4);
+    expect(Street.flop.nVisibleBoard, 3);
+    expect(Street.turn.nVisibleBoard, 4);
   });
 }
