@@ -23,7 +23,7 @@ void encode_history_row(float* out,
                         const AppliedAction& act,
                         int64_t pot_before_chips,
                         bool actor_was_us) {
-    // v0.4 layout (HIST_FEAT = 20):
+    // v0.5 layout (HIST_FEAT = 20, unchanged from v0.4):
     //   [0]      is_real (1.0 — bit 0 of every populated row)
     //   [1..11]  action one-hot (NUM_ACTIONS slots)
     //   [12]     bet_to_bb
@@ -117,35 +117,37 @@ EncodedState encode(const HUState& s) {
         encode_action_vector(e.a[i].data(), e.legal[i]);
     }
 
-    // ─── fixed-position action history ──────────────────────────────────────
-    // Each action is written into its street's sub-block at the per-street
-    // counter offset. Slot k of street s ALWAYS means "the kth action of
-    // street s" — no chronological mixing across streets.
+    // ─── reverse-chronological action history ───────────────────────────────
+    // Within each street's sub-block, slot 0 = MOST RECENT action of that
+    // street, slot 1 = next-most-recent, etc. Slots past the actual count
+    // stay zero-padded (is_real = 0).
     //
-    // Padded slots (within a sub-block, after that street's last real action)
-    // stay all-zero — is_real = 0 distinguishes them.
+    // Single backward pass over s.history: each action's street counter
+    // (= its slot index) starts at 0 and increments per row written. Once
+    // the counter hits the street's slot budget, further (older) actions
+    // on that street are dropped and the per-street truncation bit fires.
     //
-    // Budget-overflow path: if any street has more actions than its slot
-    // budget allows, throw. Fail-fast so a wrong budget assumption surfaces
-    // immediately rather than silently dropping rows.
+    // This means slot k's meaning is stable — slot 0 always answers
+    // "what just happened on this street," regardless of how deep the
+    // sequence got. Truncation drops the deepest slots; slot 0's
+    // semantics are unaffected.
     const int64_t blinds_pot = HUState::SMALL_BLIND_CHIPS + HUState::BIG_BLIND_CHIPS;
-    std::array<int, 4> per_street_count = {0, 0, 0, 0};
+    std::array<int, 4> per_street_filled = {0, 0, 0, 0};
 
-    for (std::size_t j = 0; j < s.history.size(); ++j) {
+    for (int j = static_cast<int>(s.history.size()) - 1; j >= 0; --j) {
         const AppliedAction& act = s.history[j];
         const int street_idx = static_cast<int>(act.street);
         if (street_idx < 0 || street_idx >= 4) {
             throw std::runtime_error("encode(): history action has invalid street");
         }
 
-        const int slot = per_street_count[street_idx];
+        const int slot = per_street_filled[street_idx];
         if (slot >= STREET_SLOTS[street_idx]) {
-            throw std::runtime_error(
-                "encode(): per-street action budget exceeded — bump the "
-                "relevant *_SLOTS constant in encoder.h (street=" +
-                std::to_string(street_idx) + ", slot=" +
-                std::to_string(slot) + ", history_size=" +
-                std::to_string(s.history.size()) + ")");
+            // Beyond budget — record the truncation and skip this row.
+            // We keep walking so other streets' truncation bits also fire
+            // if their counts exceed their respective budgets.
+            x[X_OFF_HIST_TRUNCATED + street_idx] = 1.f;
+            continue;
         }
 
         const int64_t pot_before = (j == 0) ? blinds_pot : s.history[j - 1].pot_after_chips;
@@ -153,7 +155,7 @@ EncodedState encode(const HUState& s) {
         const bool actor_was_us = (act.actor == s.to_act);
         encode_history_row(row, act, pot_before, actor_was_us);
 
-        per_street_count[street_idx] = slot + 1;
+        per_street_filled[street_idx] = slot + 1;
     }
 
     return e;

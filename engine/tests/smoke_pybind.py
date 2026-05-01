@@ -12,16 +12,18 @@ import pokertrainer_engine as pte
 print(f"module version check — X_DIM={pte.X_DIM}, A_DIM={pte.A_DIM}, "
       f"HIST_MAX={pte.HIST_MAX}, HIST_FEAT={pte.HIST_FEAT}, "
       f"NUM_ACTIONS={pte.NUM_ACTIONS}")
-assert pte.X_DIM == 812
+assert pte.X_DIM == 816
 assert pte.A_DIM == 11
 assert pte.HIST_MAX == 34
 assert pte.HIST_FEAT == 20
 assert pte.NUM_ACTIONS == 11
-assert pte.STATIC_DIM == 132
+assert pte.STATIC_DIM == 136
 assert pte.LEGAL_MASK_DIM == 11
+assert pte.HIST_TRUNC_DIM == 4
 assert pte.X_OFF_LEGAL_MASK == 121
-assert pte.X_OFF_PREFLOP == 132
-assert pte.X_OFF_FLOP    == 132 + 10 * pte.HIST_FEAT
+assert pte.X_OFF_HIST_TRUNCATED == 132
+assert pte.X_OFF_PREFLOP == 136
+assert pte.X_OFF_FLOP    == 136 + 10 * pte.HIST_FEAT
 assert pte.X_OFF_TURN    == pte.X_OFF_FLOP + 8 * pte.HIST_FEAT
 assert pte.X_OFF_RIVER   == pte.X_OFF_TURN + 8 * pte.HIST_FEAT
 assert pte.STREET_SLOTS   == (10, 8, 8, 8)

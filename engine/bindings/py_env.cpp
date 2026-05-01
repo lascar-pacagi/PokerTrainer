@@ -9,11 +9,12 @@
 //   - StepResult                             (done, just_acted, reward_bb)
 //   - Env                                    (reset, step, observation, payoffs_bb)
 //
-// Tensor contract (must match docs/STATE_ENCODING.md, encoding v0.4):
-//   obs.x : float32 ndarray shape (X_DIM,) = (652,)
-//            — chip-state scalars + 11-bit legal-actions mask + fixed-position
-//              action history (4 sub-blocks: preflop/flop/turn/river). Each
-//              row's bit 0 = is_real.
+// Tensor contract (must match docs/STATE_ENCODING.md, encoding v0.5):
+//   obs.x : float32 ndarray shape (X_DIM,) = (816,)
+//            — chip-state scalars + 11-bit legal-actions mask + 4-bit
+//              per-street truncation flag + reverse-chronological action
+//              history (4 sub-blocks: preflop/flop/turn/river; slot 0 of
+//              each = most recent action of that street).
 //   obs.a : float32 ndarray shape (n_legal, A_DIM) = (n_legal, 11)
 //            — pure action one-hot rows (one 1.0 per row, no scalars).
 //   obs.legal : list[ActionType] of length n_legal
@@ -70,7 +71,9 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
     m.attr("HIST_FEAT")         = pt::HIST_FEAT;
     m.attr("STATIC_DIM")        = pt::STATIC_DIM;
     m.attr("LEGAL_MASK_DIM")    = pt::LEGAL_MASK_DIM;
-    m.attr("X_OFF_LEGAL_MASK")  = pt::X_OFF_LEGAL_MASK;
+    m.attr("X_OFF_LEGAL_MASK")    = pt::X_OFF_LEGAL_MASK;
+    m.attr("X_OFF_HIST_TRUNCATED") = pt::X_OFF_HIST_TRUNCATED;
+    m.attr("HIST_TRUNC_DIM")      = pt::HIST_TRUNC_DIM;
     m.attr("X_OFF_PREFLOP")     = pt::X_OFF_PREFLOP;
     m.attr("X_OFF_FLOP")        = pt::X_OFF_FLOP;
     m.attr("X_OFF_TURN")        = pt::X_OFF_TURN;

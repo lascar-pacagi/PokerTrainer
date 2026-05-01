@@ -11,8 +11,9 @@ using namespace pt;
 
 namespace {
 
-// History-row offsets within a single HIST_FEAT-wide row (v0.4).
-// See encoder.cpp::encode_history_row for the canonical definition.
+// History-row offsets within a single HIST_FEAT-wide row (v0.5; same width
+// as v0.4). See encoder.cpp::encode_history_row for the canonical
+// definition.
 constexpr int HOFF_IS_REAL      = 0;
 constexpr int HOFF_ACTION_ONEHOT= 1;   // bits 1..11
 constexpr int HOFF_BET_TO       = 12;
@@ -55,22 +56,30 @@ TEST_CASE("Encoded x has correct dimension and bit counts", "[encoder]") {
 
     // Pot is 1.5 BB preflop (SB + BB blinds).
     REQUIRE(e.x[110] == 1.5f);
+
+    // No truncation on a fresh deal.
+    for (int st = 0; st < 4; ++st) {
+        REQUIRE(e.x[X_OFF_HIST_TRUNCATED + st] == 0.f);
+    }
 }
 
-TEST_CASE("v0.4 dim sanity", "[encoder]") {
+TEST_CASE("v0.5 dim sanity", "[encoder]") {
     REQUIRE(HIST_FEAT == 20);
     REQUIRE(HIST_MAX  == 34);
-    REQUIRE(STATIC_DIM == 132);
+    REQUIRE(STATIC_DIM == 136);
     REQUIRE(HIST_DIM  == HIST_MAX * HIST_FEAT);
     REQUIRE(X_DIM     == STATIC_DIM + HIST_DIM);
+    REQUIRE(X_DIM     == 816);
     REQUIRE(STREET_SLOTS[0] == 10);
     REQUIRE(STREET_SLOTS[1] == 8);
     REQUIRE(STREET_SLOTS[2] == 8);
     REQUIRE(STREET_SLOTS[3] == 8);
-    REQUIRE(STREET_OFFSETS[0] == 132);
-    REQUIRE(STREET_OFFSETS[1] == 132 + 10 * HIST_FEAT);
-    REQUIRE(STREET_OFFSETS[2] == 132 + (10 + 8) * HIST_FEAT);
-    REQUIRE(STREET_OFFSETS[3] == 132 + (10 + 8 + 8) * HIST_FEAT);
+    REQUIRE(STREET_OFFSETS[0] == 136);
+    REQUIRE(STREET_OFFSETS[1] == 136 + 10 * HIST_FEAT);
+    REQUIRE(STREET_OFFSETS[2] == 136 + (10 + 8) * HIST_FEAT);
+    REQUIRE(STREET_OFFSETS[3] == 136 + (10 + 8 + 8) * HIST_FEAT);
+    REQUIRE(X_OFF_HIST_TRUNCATED == 132);
+    REQUIRE(HIST_TRUNC_DIM == 4);
 }
 
 TEST_CASE("Postflop position flips: SB becomes IP", "[encoder]") {
@@ -126,48 +135,49 @@ TEST_CASE("a-rows are pure 11-dim one-hots", "[encoder]") {
     }
 }
 
-TEST_CASE("History rows: fixed-slot positioning across streets", "[encoder]") {
+TEST_CASE("History rows: slot 0 is the MOST RECENT action of its street",
+          "[encoder]") {
     auto s = HUGame::deal(21);
-    // RAISE_100 (not RAISE_50) because at preflop-initial the 0.25/0.33/0.50
-    // fractions all snap to min-raise, so dedup admits only RAISE_25.
-    HUGame::step(s, ActionType::RAISE_100);    // preflop[0] SB open
-    HUGame::step(s, ActionType::CHECK_CALL);   // preflop[1] BB call → flop
-    HUGame::step(s, ActionType::CHECK_CALL);   // flop[0] BB checks
+    HUGame::step(s, ActionType::RAISE_100);    // preflop SB open
+    HUGame::step(s, ActionType::CHECK_CALL);   // preflop BB call → flop
+    HUGame::step(s, ActionType::CHECK_CALL);   // flop BB checks
     REQUIRE(s.street == Street::FLOP);
     REQUIRE(s.to_act == Player::SB);
 
     const auto e = encode(s);
 
-    // preflop[0]: SB open. Current to_act is SB → was_us = true.
+    // Preflop sub-block:
+    //   slot 0 = MOST RECENT preflop action = BB's call
+    //   slot 1 = SB's open
+    //   slots 2..9 padded
     const float* p0 = row_at(e, Street::PREFLOP, 0);
     REQUIRE(p0[HOFF_IS_REAL] == 1.f);
-    REQUIRE(p0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
-    REQUIRE(p0[HOFF_IS_RAISE]   == 1.f);
-    REQUIRE(p0[HOFF_ACTOR_US]   == 1.f);
-    REQUIRE(p0[HOFF_ACTOR_VILL] == 0.f);
+    REQUIRE(p0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
+    REQUIRE(p0[HOFF_IS_RAISE]   == 0.f);
+    // Current to_act is SB; this row is BB's action → was_us = false.
+    REQUIRE(p0[HOFF_ACTOR_US]   == 0.f);
+    REQUIRE(p0[HOFF_ACTOR_VILL] == 1.f);
 
-    // preflop[1]: BB call.
     const float* p1 = row_at(e, Street::PREFLOP, 1);
     REQUIRE(p1[HOFF_IS_REAL] == 1.f);
-    REQUIRE(p1[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
-    REQUIRE(p1[HOFF_IS_RAISE]   == 0.f);
-    REQUIRE(p1[HOFF_ACTOR_US]   == 0.f);
-    REQUIRE(p1[HOFF_ACTOR_VILL] == 1.f);
+    REQUIRE(p1[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
+    REQUIRE(p1[HOFF_IS_RAISE]   == 1.f);
+    // SB's action, current to_act SB → was_us = true.
+    REQUIRE(p1[HOFF_ACTOR_US]   == 1.f);
+    REQUIRE(p1[HOFF_ACTOR_VILL] == 0.f);
 
-    // preflop slots 2..7 must all be zero (padding).
     for (int slot = 2; slot < PREFLOP_SLOTS; ++slot) {
         const float* r = row_at(e, Street::PREFLOP, slot);
         for (int j = 0; j < HIST_FEAT; ++j) REQUIRE(r[j] == 0.f);
     }
 
-    // flop[0]: BB's check. Current to_act on flop is SB → BB action → was_us = false.
+    // Flop sub-block: slot 0 = BB's check (only flop action so far).
     const float* f0 = row_at(e, Street::FLOP, 0);
     REQUIRE(f0[HOFF_IS_REAL] == 1.f);
     REQUIRE(f0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
     REQUIRE(f0[HOFF_ACTOR_US]   == 0.f);
     REQUIRE(f0[HOFF_ACTOR_VILL] == 1.f);
 
-    // flop slots 1..5 zero, turn block all zero, river block all zero.
     for (int slot = 1; slot < FLOP_SLOTS; ++slot) {
         const float* r = row_at(e, Street::FLOP, slot);
         for (int j = 0; j < HIST_FEAT; ++j) REQUIRE(r[j] == 0.f);
@@ -180,29 +190,39 @@ TEST_CASE("History rows: fixed-slot positioning across streets", "[encoder]") {
         const float* r = row_at(e, Street::RIVER, slot);
         for (int j = 0; j < HIST_FEAT; ++j) REQUIRE(r[j] == 0.f);
     }
+
+    // No truncation flags.
+    for (int st = 0; st < 4; ++st) {
+        REQUIRE(e.x[X_OFF_HIST_TRUNCATED + st] == 0.f);
+    }
 }
 
-TEST_CASE("Street block boundary: flop starts cleanly after preflop", "[encoder]") {
-    // Build a 4-action preflop, then flop.
+TEST_CASE("History: 4-action preflop fills slots 0..3 newest-first",
+          "[encoder]") {
     auto s = HUGame::deal(99);
-    HUGame::step(s, ActionType::RAISE_100);    // preflop[0] SB open
-    HUGame::step(s, ActionType::RAISE_100);    // preflop[1] BB 3bet
-    HUGame::step(s, ActionType::RAISE_100);    // preflop[2] SB 4bet
-    HUGame::step(s, ActionType::CHECK_CALL);   // preflop[3] BB call → flop
+    HUGame::step(s, ActionType::RAISE_100);    // SB open
+    HUGame::step(s, ActionType::RAISE_100);    // BB 3bet
+    HUGame::step(s, ActionType::RAISE_100);    // SB 4bet
+    HUGame::step(s, ActionType::CHECK_CALL);   // BB call → flop
     REQUIRE(s.street == Street::FLOP);
 
     const auto e = encode(s);
 
-    // First 4 preflop slots are real.
-    for (int slot = 0; slot < 4; ++slot) {
-        REQUIRE(row_at(e, Street::PREFLOP, slot)[HOFF_IS_REAL] == 1.f);
-    }
-    // Slot 4 is the first all-zero preflop slot.
+    // slot 0 = BB's call (most recent), slot 3 = SB's open (oldest).
+    REQUIRE(row_at(e, Street::PREFLOP, 0)
+            [HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::CHECK_CALL)] == 1.f);
+    REQUIRE(row_at(e, Street::PREFLOP, 1)
+            [HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
+    REQUIRE(row_at(e, Street::PREFLOP, 2)
+            [HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
+    REQUIRE(row_at(e, Street::PREFLOP, 3)
+            [HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::RAISE_100)] == 1.f);
+
+    // Slots 4..9 zero. Flop block all zero (no flop action yet).
     for (int slot = 4; slot < PREFLOP_SLOTS; ++slot) {
         const float* r = row_at(e, Street::PREFLOP, slot);
         for (int j = 0; j < HIST_FEAT; ++j) REQUIRE(r[j] == 0.f);
     }
-    // Flop block start (offset 292) is fully zero — no spillover.
     for (int slot = 0; slot < FLOP_SLOTS; ++slot) {
         const float* r = row_at(e, Street::FLOP, slot);
         for (int j = 0; j < HIST_FEAT; ++j) REQUIRE(r[j] == 0.f);
@@ -217,7 +237,7 @@ TEST_CASE("History rows: stack_after_bb and was_all_in are populated", "[encoder
     const auto e = encode(s);
     const float* r0 = row_at(e, Street::PREFLOP, 0);
 
-    // preflop[0] records SB's all-in. Stack after = 0, was_all_in = 1.
+    // preflop[0] = most recent = SB's all-in.
     REQUIRE(r0[HOFF_IS_REAL] == 1.f);
     REQUIRE(r0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::ALL_IN)] == 1.f);
     REQUIRE(r0[HOFF_STACK_AFTER] == 0.f);
@@ -228,23 +248,104 @@ TEST_CASE("History rows: stack_after_bb and was_all_in are populated", "[encoder
     REQUIRE(r0[HOFF_POT_AFTER] > 0.f);
 }
 
-TEST_CASE("Per-street budget overflow throws", "[encoder]") {
-    // Synthetically construct an HUState whose preflop history has more
-    // entries than PREFLOP_SLOTS allows. Direct field manipulation —
-    // doesn't require the action to be reachable through legal play.
+TEST_CASE("Per-street truncation: oldest dropped, flag fires, slot 0 still "
+          "is the most recent", "[encoder]") {
+    // Synthetically construct an HUState whose preflop history has MORE
+    // entries than PREFLOP_SLOTS. Direct field manipulation — doesn't need
+    // the actions to be reachable through legal play.
     auto s = HUGame::deal(7);
-    AppliedAction dummy{};
-    dummy.actor              = Player::SB;
-    dummy.street             = Street::PREFLOP;
-    dummy.type               = ActionType::CHECK_CALL;
-    dummy.bet_to_chips       = 0;
-    dummy.pot_after_chips    = HUState::SMALL_BLIND_CHIPS + HUState::BIG_BLIND_CHIPS;
-    dummy.stack_after_chips  = s.stacks[0];
-    dummy.was_all_in         = false;
     s.history.clear();
-    for (int i = 0; i < PREFLOP_SLOTS + 1; ++i) s.history.push_back(dummy);
 
-    REQUIRE_THROWS(encode(s));
+    constexpr int N = PREFLOP_SLOTS + 3;   // 13 actions on preflop
+    // Use distinct ActionTypes so we can verify which actions survived.
+    // Cycle through CHECK_CALL/RAISE_100 to keep is_raise meaningful.
+    for (int i = 0; i < N; ++i) {
+        AppliedAction a{};
+        a.actor             = (i % 2 == 0) ? Player::SB : Player::BB;
+        a.street            = Street::PREFLOP;
+        a.type              = (i == N - 1) ? ActionType::ALL_IN
+                            : (i % 2 == 0  ? ActionType::RAISE_100
+                                           : ActionType::CHECK_CALL);
+        a.bet_to_chips      = 100 + i * 50;
+        a.pot_after_chips   = 200 + i * 100;
+        a.stack_after_chips = 5000 - i * 100;
+        a.was_all_in        = (i == N - 1);
+        s.history.push_back(a);
+    }
+
+    const auto e = encode(s);
+
+    // Truncation bit fired for preflop only.
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + static_cast<int>(Street::PREFLOP)] == 1.f);
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + static_cast<int>(Street::FLOP)]    == 0.f);
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + static_cast<int>(Street::TURN)]    == 0.f);
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + static_cast<int>(Street::RIVER)]   == 0.f);
+
+    // Slot 0 = most recent preflop action = the all-in.
+    const float* p0 = row_at(e, Street::PREFLOP, 0);
+    REQUIRE(p0[HOFF_IS_REAL]    == 1.f);
+    REQUIRE(p0[HOFF_ACTION_ONEHOT + static_cast<int>(ActionType::ALL_IN)] == 1.f);
+    REQUIRE(p0[HOFF_WAS_ALL_IN] == 1.f);
+
+    // Slots 1..9 also populated (the most-recent 9 actions before the all-in).
+    for (int slot = 1; slot < PREFLOP_SLOTS; ++slot) {
+        const float* r = row_at(e, Street::PREFLOP, slot);
+        REQUIRE(r[HOFF_IS_REAL] == 1.f);
+    }
+
+    // The earliest 3 actions were dropped; we kept N-PREFLOP_SLOTS=3 fewer.
+    // Verify that the bet_to_bb of slot PREFLOP_SLOTS-1 (oldest kept) is
+    // greater than what slot 0 would have been if we hadn't truncated.
+    // Concretely: slot 0 is action N-1 (last), slot k is action N-1-k.
+    // So slot PREFLOP_SLOTS-1 is action (N-1)-(PREFLOP_SLOTS-1) = N-PREFLOP_SLOTS = 3.
+    // Action 3 had bet_to_chips = 100 + 3*50 = 250.
+    const float* p_last = row_at(e, Street::PREFLOP, PREFLOP_SLOTS - 1);
+    REQUIRE(p_last[HOFF_BET_TO] > 0.f);
+    // action 3 had pot_after_chips = 200 + 3*100 = 500 → 5.0 bb.
+    REQUIRE(std::abs(p_last[HOFF_POT_AFTER] - 5.0f) < 1e-3f);
+}
+
+TEST_CASE("Multi-street truncation flags are independent", "[encoder]") {
+    auto s = HUGame::deal(11);
+    s.history.clear();
+
+    // PREFLOP: 12 actions (overflow by 2).
+    for (int i = 0; i < PREFLOP_SLOTS + 2; ++i) {
+        AppliedAction a{};
+        a.actor   = Player::SB;
+        a.street  = Street::PREFLOP;
+        a.type    = ActionType::CHECK_CALL;
+        a.bet_to_chips = 100;
+        a.pot_after_chips = 200;
+        s.history.push_back(a);
+    }
+    // FLOP: 3 actions (under budget — no truncation).
+    for (int i = 0; i < 3; ++i) {
+        AppliedAction a{};
+        a.actor   = Player::BB;
+        a.street  = Street::FLOP;
+        a.type    = ActionType::CHECK_CALL;
+        a.bet_to_chips = 100;
+        a.pot_after_chips = 300;
+        s.history.push_back(a);
+    }
+    // TURN: 9 actions (overflow by 1).
+    for (int i = 0; i < TURN_SLOTS + 1; ++i) {
+        AppliedAction a{};
+        a.actor   = Player::SB;
+        a.street  = Street::TURN;
+        a.type    = ActionType::CHECK_CALL;
+        a.bet_to_chips = 100;
+        a.pot_after_chips = 400;
+        s.history.push_back(a);
+    }
+
+    const auto e = encode(s);
+
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + 0] == 1.f);  // preflop
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + 1] == 0.f);  // flop
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + 2] == 1.f);  // turn
+    REQUIRE(e.x[X_OFF_HIST_TRUNCATED + 3] == 0.f);  // river
 }
 
 TEST_CASE("Encoder refuses terminal state", "[encoder]") {

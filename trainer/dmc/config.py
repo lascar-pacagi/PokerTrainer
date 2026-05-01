@@ -11,12 +11,14 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelConfig:
-    # Fixed-position encoding (v0.4 — see docs/STATE_ENCODING.md).
-    # x carries chip-state scalars + an 11-bit legal-actions mask + the
-    # action history split into four contiguous per-street sub-blocks
-    # (preflop / flop / turn / river). Each row's bit 0 = is_real.
+    # Reverse-chronological encoding (v0.5 — see docs/STATE_ENCODING.md).
+    # x carries chip-state scalars + an 11-bit legal-actions mask + a 4-bit
+    # per-street truncation flag + the action history in four contiguous
+    # sub-blocks. Within each sub-block, slot 0 = MOST RECENT action of
+    # that street. Streets that exceed budget are silently truncated
+    # (oldest dropped) and the matching truncation bit fires.
     # a-rows are pure 11-dim one-hots — no scalar features.
-    x_dim: int = 812         # must match engine X_DIM
+    x_dim: int = 816         # must match engine X_DIM
     a_dim: int = 11          # must match engine A_DIM
     mlp_hidden: int = 512
     mlp_layers: int = 5

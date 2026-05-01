@@ -22,8 +22,8 @@ void main() {
       'streetSlots=${eng.streetSlots} '
       'modelAvailable=${eng.modelAvailable}');
 
-  // Constants must match the live engine (v0.4 dims).
-  assert(eng.xDim == 812, 'xDim drift: ${eng.xDim}');
+  // Constants must match the live engine (v0.5 dims).
+  assert(eng.xDim == 816, 'xDim drift: ${eng.xDim}');
   assert(eng.aDim == 11);
   assert(eng.histMax == 34);
   assert(eng.histFeat == 20);
