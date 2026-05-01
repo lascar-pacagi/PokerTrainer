@@ -151,9 +151,10 @@ class _ActionButton extends StatelessWidget {
                 Text(
                   subLabel!,
                   style: const TextStyle(
-                    color: Color(0xCCFFFFFF),
+                    color: Color(0xEEFFFFFF),
                     fontFamily: 'monospace',
-                    fontSize: 12,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ],

@@ -146,25 +146,25 @@ class _TerminalCard extends StatelessWidget {
                 headline,
                 style: const TextStyle(
                   color: Color(0xFFEAE6D9),
-                  fontSize: 18,
+                  fontSize: 22,
                   fontWeight: FontWeight.w800,
                   letterSpacing: 0.4,
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 12),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
                   color: const Color(0x33FFFFFF),
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(5),
                 ),
                 child: Text(
                   reasonStr,
                   style: const TextStyle(
-                    color: Color(0xCCEAE6D9),
-                    fontSize: 11,
+                    color: Color(0xEEEAE6D9),
+                    fontSize: 13,
                     letterSpacing: 0.6,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
@@ -211,18 +211,18 @@ class _TerminalCard extends StatelessWidget {
               label,
               style: TextStyle(
                 color: const Color(0xFFEAE6D9),
-                fontSize: 12,
+                fontSize: 15,
                 letterSpacing: 0.8,
                 fontWeight: isWinner ? FontWeight.w800 : FontWeight.w500,
               ),
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 8),
             Text(
               '$sign${deltaBb.toStringAsFixed(2)} bb',
               style: TextStyle(
                 color: color,
                 fontFamily: 'monospace',
-                fontSize: 14,
+                fontSize: 17,
                 fontWeight: FontWeight.w700,
               ),
             ),
@@ -230,12 +230,12 @@ class _TerminalCard extends StatelessWidget {
         ),
         if (category != null)
           Padding(
-            padding: const EdgeInsets.only(top: 1),
+            padding: const EdgeInsets.only(top: 2),
             child: Text(
               category,
               style: const TextStyle(
-                color: Color(0x99EAE6D9),
-                fontSize: 11,
+                color: Color(0xCCEAE6D9),
+                fontSize: 14,
                 fontStyle: FontStyle.italic,
               ),
             ),

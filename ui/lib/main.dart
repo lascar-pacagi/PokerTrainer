@@ -79,33 +79,48 @@ class _InspectorHomeState extends State<InspectorHome> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 _topBar(),
-                const SizedBox(height: 16),
+                const SizedBox(height: 18),
                 Expanded(
-                  child: Center(
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 880),
-                            child: TableView(
-                              session: _session,
-                              revealAllHoles: _revealAllHoles,
-                            ),
-                          ),
-                          const SizedBox(height: 16),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 880),
-                            child: ActionBar(session: _session),
-                          ),
-                          const SizedBox(height: 16),
-                          ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 880),
-                            child: HistoryStrip(history: _session.history),
-                          ),
-                        ],
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Left rail: history.
+                      SizedBox(
+                        width: 280,
+                        child: HistoryStrip(history: _session.history),
                       ),
-                    ),
+                      const SizedBox(width: 18),
+                      // Center: table + action bar.
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: 880),
+                                child: TableView(
+                                  session: _session,
+                                  revealAllHoles: _revealAllHoles,
+                                ),
+                              ),
+                              const SizedBox(height: 18),
+                              ConstrainedBox(
+                                constraints: const BoxConstraints(maxWidth: 880),
+                                child: ActionBar(session: _session),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      // Right rail: reserved for the strategy panel (lights up
+                      // once a model is loaded). Empty placeholder until then
+                      // so the layout is stable when it arrives.
+                      const SizedBox(width: 18),
+                      SizedBox(
+                        width: 240,
+                        child: _StrategyPlaceholder(session: _session),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -127,33 +142,37 @@ class _InspectorHomeState extends State<InspectorHome> {
           style: Theme.of(context).textTheme.titleLarge?.copyWith(
             fontWeight: FontWeight.w700,
             letterSpacing: 0.4,
+            fontSize: 22,
           ),
         ),
-        const SizedBox(width: 18),
+        const SizedBox(width: 22),
         Text(
           'Hand #${_session.handCount}  ·  seed $seedTxt',
           style: const TextStyle(
-            color: Color(0xAAEAE6D9),
+            color: Color(0xCCEAE6D9),
             fontFamily: 'monospace',
-            fontSize: 14,
+            fontSize: 16,
           ),
         ),
         const Spacer(),
         IconButton(
           tooltip: _revealAllHoles ? 'Hide opponent cards' : 'Reveal all holes',
-          icon: Icon(_revealAllHoles ? Icons.visibility : Icons.visibility_off),
+          icon: Icon(
+            _revealAllHoles ? Icons.visibility : Icons.visibility_off,
+            size: 22,
+          ),
           onPressed: () => setState(() => _revealAllHoles = !_revealAllHoles),
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 8),
         FilledButton.icon(
-          icon: const Icon(Icons.shuffle, size: 18),
-          label: const Text('Deal random'),
+          icon: const Icon(Icons.shuffle, size: 20),
+          label: const Text('Deal random', style: TextStyle(fontSize: 15)),
           onPressed: _session.dealRandom,
         ),
-        const SizedBox(width: 8),
+        const SizedBox(width: 10),
         FilledButton.tonalIcon(
-          icon: const Icon(Icons.replay, size: 18),
-          label: const Text('Re-seed'),
+          icon: const Icon(Icons.replay, size: 20),
+          label: const Text('Re-seed', style: TextStyle(fontSize: 15)),
           onPressed: _showSeedDialog,
         ),
       ],
@@ -197,5 +216,67 @@ class _InspectorHomeState extends State<InspectorHome> {
       ),
     );
     if (v != null) _session.dealWithSeed(v);
+  }
+}
+
+/// Placeholder for the strategy panel — empty card until a model is loaded.
+/// Once `session.strategy` is non-null, this will paint Q-bars + argmax +
+/// ΔQ-vs-action; for now it just announces itself.
+class _StrategyPlaceholder extends StatelessWidget {
+  final GameSession session;
+  const _StrategyPlaceholder({required this.session});
+
+  @override
+  Widget build(BuildContext context) {
+    final hasStrategy = session.strategy != null;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF101010),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: hasStrategy
+              ? const Color(0xFF324E7A)
+              : const Color(0xFF2A2A2A),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'STRATEGY',
+            style: TextStyle(
+              color: Color(0xCCEAE6D9),
+              fontSize: 13,
+              letterSpacing: 1.6,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (!hasStrategy)
+            const Text(
+              'No model loaded.\n\n'
+              'When a model is attached to a seat, this panel will show '
+              'its Q-value per legal action, the argmax pick, and the ΔQ '
+              'vs the action you choose.',
+              style: TextStyle(
+                color: Color(0x99EAE6D9),
+                fontStyle: FontStyle.italic,
+                fontSize: 13,
+                height: 1.4,
+              ),
+            )
+          else
+            const Text(
+              'Q-values render here.',
+              style: TextStyle(
+                color: Color(0xFFEAE6D9),
+                fontSize: 14,
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }

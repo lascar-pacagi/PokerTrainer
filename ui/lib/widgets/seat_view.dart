@@ -86,8 +86,8 @@ class SeatView extends StatelessWidget {
                     Text(
                       '· $agentLabel',
                       style: const TextStyle(
-                        color: Color(0xAAEAE6D9),
-                        fontSize: 13,
+                        color: Color(0xCCEAE6D9),
+                        fontSize: 15,
                       ),
                     ),
                   ],
@@ -113,9 +113,9 @@ class SeatView extends StatelessWidget {
                   child: Text(
                     'in: ${committedBb.toStringAsFixed(2)} bb',
                     style: const TextStyle(
-                      color: Color(0xAAEAE6D9),
+                      color: Color(0xCCEAE6D9),
                       fontFamily: 'monospace',
-                      fontSize: 13,
+                      fontSize: 15,
                     ),
                   ),
                 ),
@@ -149,8 +149,8 @@ class SeatView extends StatelessWidget {
         style: const TextStyle(
           color: Colors.white,
           fontFamily: 'monospace',
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
         ),
       ),
     );
@@ -167,9 +167,9 @@ class SeatView extends StatelessWidget {
         text,
         style: const TextStyle(
           color: Colors.white,
-          fontWeight: FontWeight.w700,
-          fontSize: 11,
-          letterSpacing: 0.6,
+          fontWeight: FontWeight.w800,
+          fontSize: 13,
+          letterSpacing: 0.8,
         ),
       ),
     );

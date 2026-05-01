@@ -45,14 +45,20 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "pokertrainer_ui");
+    gtk_header_bar_set_title(header_bar, "PokerTrainer Inspector");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "pokertrainer_ui");
+    gtk_window_set_title(window, "PokerTrainer Inspector");
   }
 
-  gtk_window_set_default_size(window, 1280, 720);
+  // Sized to fit the inspector layout (left history rail + table + action
+  // bar) without scrolling. Min size keeps the layout from collapsing.
+  gtk_window_set_default_size(window, 1500, 980);
+  GdkGeometry hints;
+  hints.min_width  = 1100;
+  hints.min_height = 760;
+  gtk_window_set_geometry_hints(window, nullptr, &hints, GDK_HINT_MIN_SIZE);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
