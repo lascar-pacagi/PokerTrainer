@@ -38,6 +38,9 @@ dependencies:
   # dart:ffi helpers (Pointer<Utf8>, calloc, etc.)
   ffi: ^2.1.0
 
+  # Native file-picker (GTK on Linux, Cocoa on macOS, Win32 on Windows).
+  file_selector: ^1.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
