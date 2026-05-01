@@ -48,13 +48,13 @@ class HistoryStrip extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         SizedBox(
-          width: 64,
+          width: 80,
           child: Text(
             _streetLabel(s),
             style: const TextStyle(
               color: Color(0xAAEAE6D9),
               fontWeight: FontWeight.w700,
-              fontSize: 11,
+              fontSize: 13,
               letterSpacing: 1.0,
             ),
           ),
@@ -65,7 +65,7 @@ class HistoryStrip extends StatelessWidget {
                   '—',
                   style: TextStyle(
                     color: Color(0x66EAE6D9),
-                    fontSize: 12,
+                    fontSize: 14,
                   ),
                 )
               : Wrap(
@@ -96,7 +96,7 @@ class HistoryStrip extends StatelessWidget {
         ? const Color(0xFF2D5B7C)
         : const Color(0xFF7C5B2D);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
         color: color,
         borderRadius: BorderRadius.circular(4),
@@ -106,7 +106,7 @@ class HistoryStrip extends StatelessWidget {
         style: const TextStyle(
           color: Colors.white,
           fontFamily: 'monospace',
-          fontSize: 11,
+          fontSize: 13,
         ),
       ),
     );

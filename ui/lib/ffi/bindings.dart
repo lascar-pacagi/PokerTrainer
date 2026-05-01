@@ -127,6 +127,14 @@ typedef _EnvGetBoardD = int Function(
 typedef _MakeCardC    = ffi.Uint8 Function(ffi.Int32, ffi.Int32);
 typedef _MakeCardD    = int Function(int, int);
 
+typedef _Eval7C       = ffi.Int32 Function(ffi.Pointer<ffi.Uint8>);
+typedef _Eval7D       = int Function(ffi.Pointer<ffi.Uint8>);
+
+typedef _RankCategoryC = ffi.Int32 Function(
+    ffi.Int32, ffi.Pointer<ffi.Char>, ffi.Int32);
+typedef _RankCategoryD = int Function(
+    int, ffi.Pointer<ffi.Char>, int);
+
 typedef _ModelLoadC   = ffi.Pointer<ffi.Void> Function(
     ffi.Pointer<ffi.Char>, ffi.Pointer<ffi.Char>);
 typedef _ModelLoadD   = ffi.Pointer<ffi.Void> Function(
@@ -188,6 +196,8 @@ final class PokerNative {
 
   // Card helpers
   final int Function(int, int) ptMakeCard;
+  final int Function(ffi.Pointer<ffi.Uint8>) ptEval7;
+  final int Function(int, ffi.Pointer<ffi.Char>, int) ptEvalRankCategory;
 
   // Env lifecycle
   final ffi.Pointer<ffi.Void> Function(int, int) ptEnvCreate;
@@ -242,6 +252,8 @@ final class PokerNative {
         ptModelAvailable = lib.lookupFunction<_IntCNative, _IntDart>('pt_model_available'),
         ptEvalInit     = lib.lookupFunction<_EvalInitC, _EvalInitD>('pt_eval_init'),
         ptMakeCard     = lib.lookupFunction<_MakeCardC, _MakeCardD>('pt_make_card'),
+        ptEval7        = lib.lookupFunction<_Eval7C, _Eval7D>('pt_eval_7'),
+        ptEvalRankCategory = lib.lookupFunction<_RankCategoryC, _RankCategoryD>('pt_eval_rank_category'),
         ptEnvCreate    = lib.lookupFunction<_EnvCreateC, _EnvCreateD>('pt_env_create'),
         ptEnvDestroy   = lib.lookupFunction<_VoidPC, _VoidPD>('pt_env_destroy'),
         ptEnvReset     = lib.lookupFunction<_EnvIntC, _EnvIntD>('pt_env_reset'),

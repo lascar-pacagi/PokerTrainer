@@ -13,6 +13,7 @@ library;
 
 import 'package:pokertrainer_ui/ffi/actions.dart';
 import 'package:pokertrainer_ui/ffi/engine.dart';
+import 'package:pokertrainer_ui/ffi/equity.dart';
 
 void main() {
   final eng = PokerEngine.init();
@@ -130,6 +131,47 @@ void main() {
     assert(snap.terminalReason == Terminal.fold);
     assert(snap.payoffChips[0] + snap.payoffChips[1] == 0);
     print('terminal: payoffSB=${snap.payoffChips[0]} payoffBB=${snap.payoffChips[1]}');
+
+    // ─── 7. Equity sanity (AA vs KK preflop ≈ 82/18) ──────────────────────
+    final aakk = computeEquity(
+      eng: eng,
+      sbHole: [EngineCard.parse('As'), EngineCard.parse('Ah')],
+      bbHole: [EngineCard.parse('Ks'), EngineCard.parse('Kh')],
+      visibleBoard: const [
+        EngineCard.noCard, EngineCard.noCard, EngineCard.noCard,
+        EngineCard.noCard, EngineCard.noCard],
+      street: Street.preflop,
+      mcSamples: 8000,
+      rngSeed: 42,
+    );
+    print('AA vs KK preflop: SB=${(aakk.sbWin*100).toStringAsFixed(1)}% '
+        'BB=${(aakk.bbWin*100).toStringAsFixed(1)}% '
+        'tie=${(aakk.tie*100).toStringAsFixed(1)}% '
+        '(${aakk.exhaustive ? "exhaustive" : "MC"} ${aakk.trials})');
+    assert(aakk.sbWin > 0.78 && aakk.sbWin < 0.86,
+        'AA equity off: ${aakk.sbWin}');
+
+    // Exhaustive flop test: AhAs vs KhKs on a board where the result is
+    // determined (no over-cards, no flush draw threat). Should still favor AA.
+    final flop = computeEquity(
+      eng: eng,
+      sbHole: [EngineCard.parse('As'), EngineCard.parse('Ah')],
+      bbHole: [EngineCard.parse('Ks'), EngineCard.parse('Kh')],
+      visibleBoard: [
+        EngineCard.parse('2d'), EngineCard.parse('7c'), EngineCard.parse('Tc'),
+        EngineCard.noCard, EngineCard.noCard,
+      ],
+      street: Street.flop,
+    );
+    print('AA vs KK on 2d 7c Tc: SB=${(flop.sbWin*100).toStringAsFixed(1)}% '
+        'tie=${(flop.tie*100).toStringAsFixed(1)}% '
+        '(${flop.exhaustive ? "exhaustive" : "MC"} ${flop.trials})');
+    assert(flop.exhaustive, 'flop should be exhaustive');
+    assert(flop.sbWin > 0.85, 'AA dominates here: got ${flop.sbWin}');
+
+    // Rank category lookup.
+    print('rank category 1 = ${rankCategory(eng, 1)}');
+    assert(rankCategory(eng, 1) == 'Straight Flush');
 
     print('OK — Dart FFI smoke passed.');
   } finally {

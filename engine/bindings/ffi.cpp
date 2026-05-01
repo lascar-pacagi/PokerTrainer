@@ -115,6 +115,22 @@ int32_t pt_eval_7(const uint8_t* cards7) {
     return static_cast<int32_t>(g_eval->evaluate7(cards7));
 }
 
+// Category label for a rank ("Straight Flush", "Full House", ...). Writes a
+// null-terminated string into out (truncated if out_cap is too small).
+// Returns the full length needed (excluding null), so callers can size
+// buffers if they want; returns -1 on out-of-range rank.
+int32_t pt_eval_rank_category(int32_t rank, char* out, int32_t out_cap) {
+    if (rank < 0 || rank > 65535) return -1;
+    const auto sv = pt::HandEvaluator::rank_category(static_cast<uint16_t>(rank));
+    const int32_t needed = static_cast<int32_t>(sv.size());
+    if (out && out_cap > 0) {
+        const int32_t copy = std::min(needed, out_cap - 1);
+        for (int32_t i = 0; i < copy; ++i) out[i] = sv[i];
+        out[copy] = '\0';
+    }
+    return needed;
+}
+
 // ─── Env lifecycle ──────────────────────────────────────────────────────────
 void* pt_env_create(uint64_t seed, int64_t starting_stack_chips) {
     try {

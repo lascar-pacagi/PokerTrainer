@@ -60,7 +60,7 @@ class ActionBar extends StatelessWidget {
 
   Widget _disabledBar(String text) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 22),
       decoration: BoxDecoration(
         color: const Color(0xFF1B1B1B),
         borderRadius: BorderRadius.circular(10),
@@ -71,6 +71,7 @@ class ActionBar extends StatelessWidget {
           style: const TextStyle(
             color: Color(0xAAEAE6D9),
             fontStyle: FontStyle.italic,
+            fontSize: 15,
           ),
         ),
       ),
@@ -126,11 +127,11 @@ class _ActionButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(7),
         onTap: onTap,
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
           decoration: isArgmax
               ? BoxDecoration(
                   borderRadius: BorderRadius.circular(7),
-                  border: Border.all(color: const Color(0xFFFFD24A), width: 2),
+                  border: Border.all(color: const Color(0xFFFFD24A), width: 2.5),
                 )
               : null,
           child: Column(
@@ -142,17 +143,17 @@ class _ActionButton extends StatelessWidget {
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w700,
-                  fontSize: 13,
+                  fontSize: 16,
                 ),
               ),
               if (subLabel != null) ...[
-                const SizedBox(height: 2),
+                const SizedBox(height: 3),
                 Text(
                   subLabel!,
                   style: const TextStyle(
                     color: Color(0xCCFFFFFF),
                     fontFamily: 'monospace',
-                    fontSize: 10,
+                    fontSize: 12,
                   ),
                 ),
               ],

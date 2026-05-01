@@ -5,7 +5,6 @@ library;
 import 'package:flutter/material.dart';
 
 import '../ffi/actions.dart';
-import '../ffi/engine.dart';
 import '../game/game_session.dart';
 import 'board_view.dart';
 import 'seat_view.dart';
@@ -24,10 +23,12 @@ class TableView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final table = session.tableState;
-    final board = session.env.getBoard();
-    final sbHole = session.env.getHole(Player.sb);
-    final bbHole = session.env.getHole(Player.bb);
+    final table   = session.tableState;
+    final board   = session.env.getBoard();
+    final sbHole  = session.env.getHole(Player.sb);
+    final bbHole  = session.env.getHole(Player.bb);
+    final equity  = session.equity;
+    final summary = session.terminalSummary();
 
     Widget seat(Player p, List<int> hole) {
       // Hide-cards rule (when not in reveal-all): hide the seat that is
@@ -36,6 +37,10 @@ class TableView extends StatelessWidget {
           !table.isTerminal &&
           table.toAct != null &&
           p != table.toAct;
+      double? eq;
+      if (equity != null && !hide) {
+        eq = p == Player.sb ? equity.sbEquity() : equity.bbEquity();
+      }
       return SeatView(
         player: p,
         table: table,
@@ -43,11 +48,12 @@ class TableView extends StatelessWidget {
         isToAct: !table.isTerminal && table.toAct == p,
         faceDown: hide,
         agentLabel: _agentLabel(session.agentFor(p)),
+        equityFraction: eq,
       );
     }
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 18),
+      padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 24),
       decoration: BoxDecoration(
         color: const Color(0xFF0A1A11),
         borderRadius: BorderRadius.circular(28),
@@ -66,17 +72,17 @@ class TableView extends StatelessWidget {
             alignment: Alignment.topCenter,
             child: seat(Player.bb, bbHole),
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
           BoardView(table: table, board: board),
-          const SizedBox(height: 20),
+          const SizedBox(height: 24),
           // SB seat (bottom)
           Align(
             alignment: Alignment.bottomCenter,
             child: seat(Player.sb, sbHole),
           ),
-          if (table.isTerminal) ...[
-            const SizedBox(height: 14),
-            _terminalBanner(table),
+          if (summary != null) ...[
+            const SizedBox(height: 18),
+            _TerminalCard(summary: summary),
           ],
         ],
       ),
@@ -88,26 +94,153 @@ class TableView extends StatelessWidget {
     if (a is ModelAgent) return 'Model · ${a.label}';
     return null;
   }
+}
 
-  Widget _terminalBanner(TableState t) {
-    final reasonStr = t.terminalReason == Terminal.fold ? 'fold' : 'showdown';
-    final sbBb = t.payoffChips[0] / TableState.chipsPerBb;
-    final bbBb = t.payoffChips[1] / TableState.chipsPerBb;
+class _TerminalCard extends StatelessWidget {
+  final TerminalSummary summary;
+  const _TerminalCard({required this.summary});
+
+  @override
+  Widget build(BuildContext context) {
+    final winner = summary.winner;
+    final isChop = winner == null;
+    final winnerColor = winner == Player.sb
+        ? const Color(0xFF2D5B7C)
+        : winner == Player.bb
+            ? const Color(0xFF7C5B2D)
+            : const Color(0xFF555555);
+
+    final headline = isChop
+        ? 'Hand chopped'
+        : '${winner.shortLabel} wins ${summary.winAmountBb.toStringAsFixed(2)} bb';
+
+    final reasonStr = summary.reason == Terminal.fold
+        ? 'opponent folded'
+        : 'showdown';
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
       decoration: BoxDecoration(
-        color: const Color(0xCC000000),
-        borderRadius: BorderRadius.circular(8),
+        color: const Color(0xEE0A0A0A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: winnerColor, width: 2),
       ),
-      child: Text(
-        'Hand ended ($reasonStr) · SB ${sbBb >= 0 ? "+" : ""}${sbBb.toStringAsFixed(2)} bb · '
-        'BB ${bbBb >= 0 ? "+" : ""}${bbBb.toStringAsFixed(2)} bb',
-        style: const TextStyle(
-          color: Color(0xFFEAE6D9),
-          fontFamily: 'monospace',
-          fontSize: 13,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isChop
+                    ? Icons.handshake
+                    : (summary.reason == Terminal.fold
+                        ? Icons.exit_to_app
+                        : Icons.emoji_events),
+                color: const Color(0xFFFFD24A),
+                size: 22,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                headline,
+                style: const TextStyle(
+                  color: Color(0xFFEAE6D9),
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.4,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0x33FFFFFF),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  reasonStr,
+                  style: const TextStyle(
+                    color: Color(0xCCEAE6D9),
+                    fontSize: 11,
+                    letterSpacing: 0.6,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // Per-player chip delta + showdown hand category if available.
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _seatLine('SB',
+                  summary.sbDeltaBb,
+                  category: summary.sbHandCategory,
+                  isWinner: winner == Player.sb),
+              const SizedBox(width: 28),
+              _seatLine('BB',
+                  summary.bbDeltaBb,
+                  category: summary.bbHandCategory,
+                  isWinner: winner == Player.bb),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _seatLine(String label, double deltaBb,
+      {String? category, required bool isWinner}) {
+    final color = deltaBb > 0
+        ? const Color(0xFF66C28F)
+        : deltaBb < 0
+            ? const Color(0xFFD0716F)
+            : const Color(0xCCEAE6D9);
+    final sign = deltaBb >= 0 ? '+' : '';
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: TextStyle(
+                color: const Color(0xFFEAE6D9),
+                fontSize: 12,
+                letterSpacing: 0.8,
+                fontWeight: isWinner ? FontWeight.w800 : FontWeight.w500,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              '$sign${deltaBb.toStringAsFixed(2)} bb',
+              style: TextStyle(
+                color: color,
+                fontFamily: 'monospace',
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
         ),
-      ),
+        if (category != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 1),
+            child: Text(
+              category,
+              style: const TextStyle(
+                color: Color(0x99EAE6D9),
+                fontSize: 11,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

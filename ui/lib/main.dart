@@ -87,7 +87,7 @@ class _InspectorHomeState extends State<InspectorHome> {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 720),
+                            constraints: const BoxConstraints(maxWidth: 880),
                             child: TableView(
                               session: _session,
                               revealAllHoles: _revealAllHoles,
@@ -95,12 +95,12 @@ class _InspectorHomeState extends State<InspectorHome> {
                           ),
                           const SizedBox(height: 16),
                           ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 720),
+                            constraints: const BoxConstraints(maxWidth: 880),
                             child: ActionBar(session: _session),
                           ),
                           const SizedBox(height: 16),
                           ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 720),
+                            constraints: const BoxConstraints(maxWidth: 880),
                             child: HistoryStrip(history: _session.history),
                           ),
                         ],
@@ -135,7 +135,7 @@ class _InspectorHomeState extends State<InspectorHome> {
           style: const TextStyle(
             color: Color(0xAAEAE6D9),
             fontFamily: 'monospace',
-            fontSize: 12,
+            fontSize: 14,
           ),
         ),
         const Spacer(),
