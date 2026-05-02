@@ -71,16 +71,30 @@ def _actor_loop(actor_id: int,
                 net: DMCNet,
                 trans_queue: mp.Queue,
                 stop_event,
+                pause_event,
                 eps_shared,
                 ban_allin_pre_shared,
                 cfg: DMCConfig,
-                base_seed: int) -> None:
+                base_seed: int,
+                torch_threads: int) -> None:
     """Play hands forever; push each hand's (xs, as_, rs) batch to the queue.
 
     Runs in a child process. `net` is the CPU-shared model — every actor
     reads the same parameter memory; the learner writes into it asynchronously
     via the per-N-steps sync from net_gpu.
+
+    Each actor pins itself to `torch_threads` torch CPU threads (default 1).
+    Single-state forward through the MLP is too small to benefit from
+    intra-op parallelism, and the default of (cores) threads × N actors
+    massively oversubscribes the box and starves the main process during
+    eval — exactly the failure mode that hung the 200K run on 2026-05-02.
+
+    `pause_event` is set by the main process during eval; actors wait
+    between hands while it's set so eval has the CPU to itself. We never
+    abandon a mid-hand — pause is checked at hand boundaries only.
     """
+    torch.set_num_threads(max(1, int(torch_threads)))
+
     env = pte.Env((base_seed ^ (actor_id * 0x9E3779B1)) & 0xFFFFFFFFFFFFFFFF)
     rng = np.random.default_rng(base_seed + actor_id * 7919)
     device = torch.device("cpu")
@@ -90,6 +104,12 @@ def _actor_loop(actor_id: int,
 
     try:
         while not stop_event.is_set():
+            # Pause check at hand boundaries — never mid-decision.
+            while pause_event.is_set() and not stop_event.is_set():
+                stop_event.wait(0.05)
+            if stop_event.is_set():
+                break
+
             env.reset()
             eps = float(eps_shared.value)
             ban_allin_pre = bool(ban_allin_pre_shared.value)
@@ -252,6 +272,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-allin-until-step", type=int, default=0,
                    help="forbid ALL_IN preflop in actors' rollout policy "
                         "until learner reaches step N. 0 disables.")
+    p.add_argument("--actor-torch-threads", type=int, default=1,
+                   help="torch.set_num_threads() inside each actor process. "
+                        "Default 1 — single-state forward gets no benefit "
+                        "from multi-threading, and the default of (cores) × "
+                        "(N actors) oversubscribes the CPU and starves the "
+                        "main process during eval.")
+    p.add_argument("--pause-actors-during-eval", type=int, default=1,
+                   help="1 (default) = freeze actors at hand boundaries "
+                        "while eval runs, so eval has the CPU to itself. "
+                        "0 = let actors keep running (will slow eval).")
     # Model architecture overrides (otherwise cfg.model defaults are used).
     p.add_argument("--arch", type=str, default=None,
                    choices=("mlp_v1", "resmlp_v1"))
@@ -362,6 +392,7 @@ def main() -> None:
     # ── Step 4: spawn actors ────────────────────────────────────────────────
     trans_queue: mp.Queue = ctx.Queue(maxsize=args.queue_maxsize)
     stop_event = ctx.Event()
+    pause_event = ctx.Event()   # set by learner during eval; cleared otherwise
     eps_shared = ctx.Value('d', cfg.actor.epsilon_start)
     ban_allin_pre = 1 if args.no_allin_until_step > 0 else 0
     ban_allin_pre_shared = ctx.Value('i', ban_allin_pre)
@@ -370,8 +401,9 @@ def main() -> None:
     for aid in range(args.mp_actors):
         p = ctx.Process(
             target=_actor_loop,
-            args=(aid, net_cpu, trans_queue, stop_event, eps_shared,
-                  ban_allin_pre_shared, cfg, cfg.actor.base_seed),
+            args=(aid, net_cpu, trans_queue, stop_event, pause_event,
+                  eps_shared, ban_allin_pre_shared,
+                  cfg, cfg.actor.base_seed, args.actor_torch_threads),
             daemon=True,
             name=f"actor-{aid}",
         )
@@ -475,9 +507,22 @@ def main() -> None:
                         sync_cpu_from_gpu(net_cpu, net_gpu)
                         sync_count += 1
                     last_eval_step = step
-                    _run_eval_suite(net_cpu, eval_opponents,
-                                    args.eval_hands, args.eval_seed, step,
-                                    duplicated=not args.no_duplicated_eval)
+                    eval_t0 = time.time()
+                    if args.pause_actors_during_eval:
+                        pause_event.set()
+                        # Brief settle so any in-flight hand can finish
+                        # before we start hammering the CPU for eval.
+                        time.sleep(0.5)
+                        print(f"[dmc_mp_gpu] step={step}: actors paused for eval")
+                    try:
+                        _run_eval_suite(net_cpu, eval_opponents,
+                                        args.eval_hands, args.eval_seed, step,
+                                        duplicated=not args.no_duplicated_eval)
+                    finally:
+                        if args.pause_actors_during_eval:
+                            pause_event.clear()
+                            print(f"[dmc_mp_gpu] step={step}: eval done in "
+                                  f"{time.time() - eval_t0:.1f}s — actors resumed")
 
                 if (args.checkpoint_every_steps > 0
                         and step % args.checkpoint_every_steps == 0
@@ -490,9 +535,16 @@ def main() -> None:
         if eval_opponents and step != last_eval_step:
             if learner_device.type == "cuda":
                 sync_cpu_from_gpu(net_cpu, net_gpu)
-            _run_eval_suite(net_cpu, eval_opponents, args.eval_hands,
-                            args.eval_seed, step,
-                            duplicated=not args.no_duplicated_eval)
+            if args.pause_actors_during_eval:
+                pause_event.set()
+                time.sleep(0.5)
+            try:
+                _run_eval_suite(net_cpu, eval_opponents, args.eval_hands,
+                                args.eval_seed, step,
+                                duplicated=not args.no_duplicated_eval)
+            finally:
+                if args.pause_actors_during_eval:
+                    pause_event.clear()
         final = ckpt_dir / f"weights_final_{step:08d}.ckpt"
         save_checkpoint(final, net_gpu, optim, step, cfg)
         print(f"[dmc_mp_gpu] done — saved {final}  steps={step}  "
