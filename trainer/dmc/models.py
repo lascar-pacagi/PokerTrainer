@@ -27,6 +27,8 @@ terminal Monte-Carlo return (chip delta in BB).
 """
 from __future__ import annotations
 
+from typing import Final
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -55,7 +57,16 @@ class DMCNet(nn.Module):
         mlp_v1     — `self.mlp = nn.Sequential(...)`     (legacy ckpt-compat)
         resmlp_v1  — `self.stem`, `self.blocks`, `self.ln_out`, `self.head`
     Forward dispatches on the same flag.
+
+    `arch` is listed in `__constants__` so TorchScript treats it as a
+    compile-time constant and prunes the dead branch in `forward()`.
+    Without this, `torch.jit.script` rejects a resmlp_v1 model because
+    the mlp_v1 branch references `self.mlp`, which doesn't exist on the
+    resmlp instance.
     """
+
+    __constants__ = ["arch"]
+    arch: Final[str]
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
@@ -63,6 +74,13 @@ class DMCNet(nn.Module):
         in_dim = cfg.x_dim + cfg.a_dim
         self.arch = getattr(cfg, "arch", "mlp_v1")
 
+        # TorchScript scripting requires every attribute referenced in
+        # forward() to exist, even on the dead arch branch. So we declare
+        # both submodule sets unconditionally and use nn.Identity() (and
+        # an empty ModuleList) as parameter-free placeholders for the
+        # arch we're not using. State-dict keys for placeholders are
+        # absent (Identity / empty list have no parameters), so existing
+        # ckpts load cleanly into the new layout.
         if self.arch == "mlp_v1":
             layers: list[nn.Module] = []
             prev = in_dim
@@ -71,6 +89,11 @@ class DMCNet(nn.Module):
                 prev = cfg.mlp_hidden
             layers += [nn.Linear(prev, 1)]
             self.mlp = nn.Sequential(*layers)
+            # resmlp placeholders.
+            self.stem   = nn.Identity()
+            self.blocks = nn.ModuleList([])
+            self.ln_out = nn.Identity()
+            self.head   = nn.Identity()
         elif self.arch == "resmlp_v1":
             expansion = getattr(cfg, "mlp_expansion", 4)
             self.stem    = nn.Linear(in_dim, cfg.mlp_hidden)
@@ -79,6 +102,8 @@ class DMCNet(nn.Module):
             ])
             self.ln_out  = nn.LayerNorm(cfg.mlp_hidden)
             self.head    = nn.Linear(cfg.mlp_hidden, 1)
+            # mlp placeholder.
+            self.mlp = nn.Identity()
         else:
             raise ValueError(f"unknown ModelConfig.arch: {self.arch!r}")
 

@@ -53,6 +53,8 @@ def _load_cfg(blob: dict) -> ModelConfig:
                 a_dim=int(mcfg.a_dim),
                 mlp_hidden=int(mcfg.mlp_hidden),
                 mlp_layers=int(mcfg.mlp_layers),
+                arch=str(getattr(mcfg, "arch", "mlp_v1")),
+                mlp_expansion=int(getattr(mcfg, "mlp_expansion", 4)),
             )
         except Exception:
             pass
