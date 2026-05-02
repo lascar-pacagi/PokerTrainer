@@ -19,12 +19,12 @@ Two networks live in the parent process:
                have under all-CPU mp; DMC MC-target variance swamps the
                staleness).
 
-Forkserver bootstrap: forkserver's helper process is spawned lazily on the
-first ctx.Process(...).start(). If the parent has initialised CUDA by
-that point, the helper inherits CUDA state and any actor forked from it
-deadlocks at `import torch`. We side-step this by forcing a no-op
-ctx.Process(...).start() BEFORE moving any tensor to CUDA, so the helper
-exists in a CUDA-free state and stays that way for the run.
+Why forkserver and not fork: Python's forkserver spawns its helper via
+fork+exec (the exec replaces the process image, so the helper boots up
+clean regardless of whether the parent had CUDA initialised). Worker
+actors are then forked from the helper — never directly from this
+process — so they never inherit CUDA state. PyTorch officially endorses
+forkserver as the CUDA-safe start method.
 
 CLI:
     python -m dmc.dmc_mp_gpu --mp-actors 8 --learner-device cuda:0 \
@@ -63,29 +63,6 @@ OPPONENT_FACTORIES = {
     "check_fold":      CheckFoldPolicy,
     "calling_station": CallingStationPolicy,
 }
-
-
-# ─── Forkserver bootstrap (pre-CUDA-init) ──────────────────────────────────
-
-def _forkserver_noop() -> None:
-    """No-op target whose only job is to force the forkserver helper to spawn."""
-    return
-
-
-def _start_forkserver_now(ctx) -> None:
-    """Force the forkserver helper to spawn from THIS process before we
-    initialise CUDA. Subsequent ctx.Process(...).start() calls fork from the
-    (CUDA-free) helper instead of inheriting the parent's CUDA context.
-    Without this, GPU+forkserver deadlocks when actors `import torch`.
-    """
-    p = ctx.Process(target=_forkserver_noop, daemon=True)
-    p.start()
-    p.join(timeout=10.0)
-    if p.is_alive():
-        p.terminate()
-        raise RuntimeError(
-            "forkserver bootstrap process didn't exit within 10s — something "
-            "is wrong with the multiprocessing context")
 
 
 # ─── Actor process entry point ──────────────────────────────────────────────
@@ -331,16 +308,15 @@ def main() -> None:
     net_cpu = DMCNet(cfg.model)
     net_cpu.share_memory()
 
-    # ── Step 2: get the multiprocessing context, pre-spawn the forkserver ──
-    # We must do this BEFORE moving anything to CUDA. The forkserver helper
-    # is a child of THIS process; if it exists before CUDA init, it (and
-    # the actor workers it later spawns) won't inherit a CUDA context.
+    # ── Step 2: get the multiprocessing context (forkserver is CUDA-safe
+    # because Python's `forkserver` start method spawns its helper via
+    # fork+exec, which discards the parent's CUDA state regardless of
+    # when the first ctx.Process.start() runs). Workers are then forked
+    # from the (clean) helper, never directly from this process.
     ctx = mp.get_context("forkserver")
     learner_device = torch.device(args.learner_device)
-    if learner_device.type == "cuda":
-        _start_forkserver_now(ctx)
 
-    # ── Step 3: build the GPU learner net (now safe to init CUDA) ───────────
+    # ── Step 3: build the GPU learner net ───────────────────────────────────
     if learner_device.type == "cuda":
         if not torch.cuda.is_available():
             raise SystemExit(
