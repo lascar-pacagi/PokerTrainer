@@ -48,6 +48,12 @@ class PokerEngine {
 
   static PokerEngine? _instance;
 
+  /// The cached singleton (if init() has been called). Returns null if the
+  /// engine wasn't initialised yet — callers that just want to call into
+  /// pt_eval_7 from a screen far away from main.dart can use this rather
+  /// than threading the instance through every widget constructor.
+  static PokerEngine? get instance => _instance;
+
   /// Loads the .so + initializes the hand-eval tables. Call once at app
   /// startup. `tablesPath` is passed straight to `pt_eval_init`; an empty
   /// string means "load-or-generate at the engine's default location."
