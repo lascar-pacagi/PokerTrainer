@@ -1,19 +1,25 @@
 #include "env.h"
 
+#include <memory>
 #include <random>
 #include <stdexcept>
 
 namespace pt {
 
 struct Env::Impl {
-    std::mt19937_64 rng;
-    HandEvaluator   evaluator;
-    int64_t         starting_stack_chips;
+    std::mt19937_64                rng;
+    std::shared_ptr<HandEvaluator> evaluator;   // shared across clones
+    int64_t                        starting_stack_chips;
 
     Impl(uint64_t seed, int64_t stack_chips)
         : rng(seed),
-          evaluator(HandEvaluator::load_or_generate("")),
+          evaluator(std::make_shared<HandEvaluator>(
+              HandEvaluator::load_or_generate(""))),
           starting_stack_chips(stack_chips) {}
+
+    // Cheap copy ctor: shared_ptr bumps refcount; mt19937_64 is byte-copied.
+    // Used by Env::clone(); explicitly defined so the intent is documented.
+    Impl(const Impl& other) = default;
 };
 
 Env::Env(uint64_t seed, int64_t starting_stack_chips)
@@ -24,6 +30,16 @@ Env::Env(uint64_t seed, int64_t starting_stack_chips)
 Env::~Env() = default;
 Env::Env(Env&&) noexcept = default;
 Env& Env::operator=(Env&&) noexcept = default;
+
+std::unique_ptr<Env> Env::clone() const {
+    // Bypass the public ctor (which calls reset() and rerolls the deal) by
+    // constructing an empty Env via the move-ctor on a default-seeded one
+    // and overwriting both the impl and state.
+    auto out = std::unique_ptr<Env>(new Env(0, impl_->starting_stack_chips));
+    out->impl_  = std::make_unique<Impl>(*impl_);
+    out->state_ = state_;
+    return out;
+}
 
 void Env::reset() {
     const uint64_t hand_seed = impl_->rng();
@@ -42,7 +58,7 @@ Env::StepResult Env::step_action(ActionType a) {
     if (state_.is_terminal())
         throw std::runtime_error("step on terminal state");
     const Player actor = state_.to_act;
-    HUGame::step(state_, a, &impl_->evaluator);
+    HUGame::step(state_, a, impl_->evaluator.get());
 
     StepResult out{};
     out.just_acted = actor;

@@ -136,7 +136,13 @@ def _play_one_hand(env, sb_pol, bb_pol, policy_a,
         actor = env.to_act()
         obs   = env.observation()
         pol   = sb_pol if actor == pte.Player.SB else bb_pol
-        idx   = pol.choose(obs, rng)
+        # Seat-aware dispatch: policies that need to know their seat (CFR,
+        # which has a per-player adv net) implement `choose_with_seat`.
+        # Standard policies (DMC, baselines) ignore seat via plain `choose`.
+        if hasattr(pol, "choose_with_seat"):
+            idx = pol.choose_with_seat(obs, int(actor), rng)
+        else:
+            idx = pol.choose(obs, rng)
         if pol is policy_a:
             # Street one-hot lives at x[104:108] per STATE_ENCODING.md.
             street = int(np.argmax(obs.x[104:108]))

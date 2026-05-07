@@ -241,5 +241,8 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
         .def("state",         &pt::Env::state, py::return_value_policy::reference_internal)
         .def("is_terminal",   &pt::Env::is_terminal)
         .def("to_act",        &pt::Env::to_act)
-        .def("payoffs_bb",    &pt::Env::payoffs_bb);
+        .def("payoffs_bb",    &pt::Env::payoffs_bb)
+        .def("clone",         &pt::Env::clone,
+             "Deep-copy this Env (shared HandEvaluator). Used by CFR-style "
+             "tree traversal that needs to branch into multiple actions.");
 }

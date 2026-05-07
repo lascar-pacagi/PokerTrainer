@@ -28,7 +28,7 @@ PYTHONPATH=engine/build:trainer python -m dmc.dmc_mp_gpu \
     --min-buffer 20000 \
     --epsilon-start 1.0 \
     --epsilon-end 0.10 \
-    --epsilon-decay-steps 50000 \
+    --epsilon-decay-steps 100000 \
     --reward-clip 10.0 \
     --slot-log-every 5000 \
     --eval-every-steps 10000 \

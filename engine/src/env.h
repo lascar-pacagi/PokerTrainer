@@ -42,6 +42,19 @@ public:
     Env(const Env&)            = delete;
     Env& operator=(const Env&) = delete;
 
+    // Deep-copy the env state without rebuilding the (large) hand-eval
+    // lookup tables. The cloned Env shares the same HandEvaluator instance
+    // (reference-counted via shared_ptr) and copies the RNG state byte-wise,
+    // so subsequent reset() calls on the original and the clone diverge
+    // immediately. The current HUState (cards, bets, history, terminal flag)
+    // is copied by value — cheap.
+    //
+    // Use case: external-sampling CFR traversal needs to branch all actions
+    // at a traverser node, recurse into each subtree, and unwind back to the
+    // pre-step state. Clone the env, step the clone, throw it away when the
+    // recursion returns.
+    std::unique_ptr<Env> clone() const;
+
     // Start a new hand. If `hand_seed` is null, uses the Env's internal RNG.
     void reset();
     void reset(uint64_t hand_seed);

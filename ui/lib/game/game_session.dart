@@ -95,6 +95,13 @@ class GameSession extends ChangeNotifier {
   /// Counter the UI can show ("Hand #N"). Bumped on every fresh deal.
   int _handCount = 1;
 
+  /// When false, model seats do NOT auto-step. The user advances them
+  /// manually via the action bar (which lights up identically to a Human
+  /// turn while the strategy panel still shows the model's prediction).
+  /// Default true preserves the original "model plays through immediately"
+  /// behavior. Toggle from the top-bar control.
+  bool _autoStep = true;
+
   GameSession(this.engine) : env = EnvHandle.create(engine) {
     _refresh();
   }
@@ -110,6 +117,32 @@ class GameSession extends ChangeNotifier {
   int? get currentSeed => _currentSeed;
   SeatAgent agentFor(Player p) => _agents[p]!;
   bool get isTerminal => _tableState.isTerminal;
+  bool get autoStep => _autoStep;
+
+  /// Toggle the auto-step behavior. If turning ON while a model seat is
+  /// currently to-act, immediately drains the model decisions until the
+  /// next Human turn or terminal — same as the original auto-step path.
+  void setAutoStep(bool value) {
+    if (_autoStep == value) return;
+    _autoStep = value;
+    notifyListeners();
+    if (_autoStep) _autoStepIfModel();
+  }
+
+  /// If the seat-to-act is a Model, advance one step using the model's argmax.
+  /// Refreshes state and recurses (still gated by `_autoStep` — so this is the
+  /// "Step model's pick" button's underlying action; in auto mode this just
+  /// triggers the same drain loop already running).
+  void stepModelOnce() {
+    final p = _tableState.toAct;
+    if (p == null || _tableState.isTerminal) return;
+    final agent = _agents[p];
+    if (agent is! ModelAgent) return;
+    final r = agent.model.query(env);
+    env.applyLegal(r.argmax);
+    _refresh();
+    _autoStepIfModel();
+  }
 
   // ─── deal / reset ───────────────────────────────────────────────────────
 
@@ -275,10 +308,11 @@ class GameSession extends ChangeNotifier {
     return StrategyView(qValues: r.qValues, argmaxLegalIdx: r.argmax);
   }
 
-  /// If the seat-to-act is a Model, take its argmax action. Loops until
-  /// either the hand ends or control returns to a Human. Cap iterations as
-  /// a safety net against runaway loops.
+  /// If the seat-to-act is a Model AND auto-step is enabled, take its
+  /// argmax action. Loops until either the hand ends or control returns
+  /// to a Human. Cap iterations as a safety net against runaway loops.
   void _autoStepIfModel() {
+    if (!_autoStep) return;
     int safety = 64;
     while (!_tableState.isTerminal && safety-- > 0) {
       final p = _tableState.toAct;

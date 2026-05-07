@@ -54,10 +54,12 @@ static void my_application_activate(GApplication* application) {
 
   // Sized to fit the inspector layout (left history rail + table + action
   // bar) without scrolling. Min size keeps the layout from collapsing.
-  gtk_window_set_default_size(window, 1500, 980);
+  // Bumped 2026-05 once the action bar grew the manual-step header + the
+  // "Step model's pick" button (so all 11 action slots fit without wrapping).
+  gtk_window_set_default_size(window, 1750, 1040);
   GdkGeometry hints;
-  hints.min_width  = 1100;
-  hints.min_height = 760;
+  hints.min_width  = 1300;
+  hints.min_height = 820;
   gtk_window_set_geometry_hints(window, nullptr, &hints, GDK_HINT_MIN_SIZE);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();

@@ -14,6 +14,59 @@ TEST_CASE("Env reset produces observation with preflop SB to act", "[env]") {
     REQUIRE(!obs.legal.empty());
 }
 
+TEST_CASE("Env clone is independent of parent", "[env][clone]") {
+    Env env(7);
+    env.reset(42);
+    // Advance two CHECK_CALL preflop actions for a non-trivial state.
+    for (int i = 0; i < 2; ++i) {
+        const auto obs = env.observation();
+        int idx = 0;
+        for (size_t k = 0; k < obs.legal.size(); ++k)
+            if (obs.legal[k] == ActionType::CHECK_CALL) { idx = static_cast<int>(k); break; }
+        env.step(idx);
+    }
+    REQUIRE(!env.is_terminal());
+
+    const auto hist_before = env.state().history.size();
+    const auto pot_before  = env.state().pot_chips;
+    const auto to_act_pre  = env.to_act();
+    const auto hole_pre    = env.state().hole;
+    const auto board_pre   = env.state().board;
+
+    // Drive a clone to terminal; parent must be untouched.
+    auto clone = env.clone();
+    while (!clone->is_terminal()) {
+        const auto obs = clone->observation();
+        int idx = 0;
+        for (size_t k = 0; k < obs.legal.size(); ++k)
+            if (obs.legal[k] == ActionType::CHECK_CALL) { idx = static_cast<int>(k); break; }
+        clone->step(idx);
+    }
+    REQUIRE(clone->is_terminal());
+
+    REQUIRE(env.state().history.size() == hist_before);
+    REQUIRE(env.state().pot_chips      == pot_before);
+    REQUIRE(env.to_act()               == to_act_pre);
+    REQUIRE(!env.is_terminal());
+    REQUIRE(env.state().hole  == hole_pre);
+    REQUIRE(env.state().board == board_pre);
+
+    // Two clones with the same scripted line → same payoffs.
+    auto c2 = env.clone();
+    auto c3 = env.clone();
+    for (auto* c : {c2.get(), c3.get()}) {
+        while (!c->is_terminal()) {
+            const auto obs = c->observation();
+            int idx = 0;
+            for (size_t k = 0; k < obs.legal.size(); ++k)
+                if (obs.legal[k] == ActionType::CHECK_CALL) { idx = static_cast<int>(k); break; }
+            c->step(idx);
+        }
+    }
+    REQUIRE(c2->payoffs_bb() == c3->payoffs_bb());
+    REQUIRE(c2->payoffs_bb() == clone->payoffs_bb());
+}
+
 TEST_CASE("Env step by legal index matches step by action", "[env]") {
     Env a(123), b(123);
     const auto obs_a = a.observation();

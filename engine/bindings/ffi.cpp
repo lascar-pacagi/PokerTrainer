@@ -38,6 +38,10 @@ struct EnvBox {
 
     explicit EnvBox(uint64_t seed, int64_t stack)
         : env(seed, stack) {}
+
+    // Wrap an Env constructed elsewhere (e.g. by Env::clone()).
+    explicit EnvBox(pt::Env&& env_in)
+        : env(std::move(env_in)) {}
 };
 
 #ifdef PT_FFI_INFER
@@ -144,6 +148,20 @@ void* pt_env_create(uint64_t seed, int64_t starting_stack_chips) {
 
 void pt_env_destroy(void* handle) {
     delete static_cast<EnvBox*>(handle);
+}
+
+// Deep-copy an Env (shared HandEvaluator). Returns a fresh handle the caller
+// must destroy with pt_env_destroy. The cloned EnvBox starts with no cached
+// last_obs (callers should observe before stepping). Returns nullptr on error.
+void* pt_env_clone(const void* handle) {
+    if (!handle) return nullptr;
+    const auto* src = static_cast<const EnvBox*>(handle);
+    try {
+        auto cloned = src->env.clone();   // std::unique_ptr<pt::Env>
+        return static_cast<void*>(new EnvBox(std::move(*cloned)));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 int32_t pt_env_reset(void* handle) {
