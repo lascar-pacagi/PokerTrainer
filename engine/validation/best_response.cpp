@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -32,6 +34,11 @@ struct Ctx {
     const std::vector<Combo>* opp_combos;
     size_t                    n_target;
     size_t                    n_opp;
+    /// Chance-node sampling config + RNG. `samples == 0` means exhaustive
+    /// (the RNG is unused). When `samples > 0`, the chance handler picks
+    /// up to that many random children at each chance level.
+    int                       samples;
+    mutable std::mt19937_64   rng;
 };
 
 inline bool combos_share_card(const Combo& a, const Combo& b) {
@@ -194,13 +201,105 @@ std::vector<double> handle_terminal(
     return V;
 }
 
+/// Per-card multiplicity for chance averaging.
+///
+/// pt-solver's tree dump uses suit isomorphism: when N suits have the same
+/// number of board cards, only one representative is emitted per iso
+/// class. To recover the correct chance-node expectation, each rep gets
+/// weighted by its iso-class size — minus any card that the target hand
+/// shares with the iso class (since target's hand blocks those deals).
+///
+/// `iso_class_size_per_suit[s]` = number of suits with the same board
+/// count as `s`. Stored per chance-node since the iso classes change
+/// after each card is dealt.
+struct IsoWeights {
+    std::array<int, 4> iso_class_size_per_suit;
+};
+
+IsoWeights compute_iso_weights(const Node& node) {
+    std::array<int, 4> board_count = {0, 0, 0, 0};
+    for (Card c : node.board) ++board_count[suit_of(c)];
+    IsoWeights w;
+    for (int s = 0; s < 4; ++s) {
+        int n = 0;
+        for (int t = 0; t < 4; ++t) {
+            if (board_count[t] == board_count[s]) ++n;
+        }
+        w.iso_class_size_per_suit[s] = n;
+    }
+    return w;
+}
+
+/// How many actual cards a chance-rep stands for, given target's hand
+/// blocks some. Iso-class size minus (number of target hole cards whose
+/// suit is in this iso class AND whose rank matches the rep card).
+inline int multiplicity_for_target(
+    Card rep_card,
+    const Combo& tc,
+    const IsoWeights& iw) {
+    const int suit = suit_of(rep_card);
+    const int rank = rank_of(rep_card);
+    int m = iw.iso_class_size_per_suit[suit];
+    // Subtract target hole cards that occupy a slot in this iso class.
+    for (Card hc : tc.cards) {
+        if (rank_of(hc) != rank) continue;
+        const int hs = suit_of(hc);
+        if (iw.iso_class_size_per_suit[hs] != m) continue; // different class
+        // hc is in the same iso class as rep — it consumes one slot.
+        --m;
+    }
+    return m < 0 ? 0 : m;
+}
+
+/// Per-h_target sum of unblocked opp_reach at a node — i.e. the cf-value
+/// → chip-value conversion factor at that node. Combos that share a card
+/// with the target's hand or are otherwise blocked contribute 0.
+std::vector<double> compute_sum_reach(
+    const std::vector<double>& opp_reach,
+    const Ctx&                 ctx) {
+    std::vector<double> out(ctx.n_target, 0.0);
+    for (size_t h = 0; h < ctx.n_target; ++h) {
+        const Combo& tc = (*ctx.target_combos)[h];
+        for (size_t hq = 0; hq < ctx.n_opp; ++hq) {
+            if (opp_reach[hq] <= 0) continue;
+            const Combo& oc = (*ctx.opp_combos)[hq];
+            if (combos_share_card(tc, oc)) continue;
+            out[h] += opp_reach[hq];
+        }
+    }
+    return out;
+}
+
 std::vector<double> handle_chance(
     const Node&                node,
     const std::vector<double>& opp_reach,
     const Ctx&                 ctx) {
-    std::vector<double> V(ctx.n_target, 0.0);
-    std::vector<int>    n_valid(ctx.n_target, 0);
-    for (const auto& edge : node.children) {
+    // Pick which chance children to actually visit. Exhaustive (samples==0)
+    // walks them all; Monte Carlo picks `samples` at random without
+    // replacement (Fisher-Yates partial shuffle). Per-h_target validity
+    // (skipping cards in h) is handled inside the loop.
+    const size_t n_children = node.children.size();
+    std::vector<size_t> indices(n_children);
+    std::iota(indices.begin(), indices.end(), size_t{0});
+    if (ctx.samples > 0 && static_cast<size_t>(ctx.samples) < n_children) {
+        const size_t k = static_cast<size_t>(ctx.samples);
+        for (size_t i = 0; i < k; ++i) {
+            std::uniform_int_distribution<size_t> dist(i, n_children - 1);
+            const size_t j = dist(ctx.rng);
+            std::swap(indices[i], indices[j]);
+        }
+        indices.resize(k);
+    }
+
+    const IsoWeights iw = compute_iso_weights(node);
+    // Per-h_target sum_opp_reach at the chance node — used to re-scale
+    // back to cf-value units after averaging chip-values across cards.
+    const auto reach_at_node = compute_sum_reach(opp_reach, ctx);
+
+    std::vector<double> chip_sum(ctx.n_target, 0.0);
+    std::vector<double> weight_sum(ctx.n_target, 0.0);
+    for (const size_t idx : indices) {
+        const auto& edge = node.children[idx];
         Card dealt = static_cast<Card>(edge.action_idx);
         // Filter opp combos that contain the dealt card.
         std::vector<double> child_reach(opp_reach);
@@ -209,18 +308,34 @@ std::vector<double> handle_chance(
                 child_reach[hq] = 0;
             }
         }
+        const auto reach_at_child = compute_sum_reach(child_reach, ctx);
         const Node& child = ctx.scenario->node_at(edge.node_id);
         auto child_v = compute_v_at(child, child_reach, Player::None, ctx);
         for (size_t h = 0; h < ctx.n_target; ++h) {
-            // Skip target combos containing the dealt card — those reach 0
-            // through this branch.
-            if (combo_contains((*ctx.target_combos)[h], dealt)) continue;
-            V[h] += child_v[h];
-            ++n_valid[h];
+            const Combo& tc = (*ctx.target_combos)[h];
+            // Iso-class multiplicity, accounting for cards in target's hand.
+            const int m = multiplicity_for_target(dealt, tc, iw);
+            if (m == 0) continue; // target blocks every card in this class
+            // Convert child's cf-value to chip-value (V_cf / sum_opp_reach)
+            // BEFORE averaging across cards. Otherwise blocker-induced
+            // variation in opp_reach across cards corrupts the average:
+            // a card that blocks half of opp's combos has a cf-value
+            // half as large as a non-blocker card, but the same chip
+            // expectation. Without this normalization we'd undercount
+            // those branches.
+            if (reach_at_child[h] <= 0) continue;
+            const double chip_v = child_v[h] / reach_at_child[h];
+            chip_sum[h] += m * chip_v;
+            weight_sum[h] += m;
         }
     }
+    // Convert mean chip-value back to cf-value units for upstream
+    // propagation: V_cf = V_chip * sum_reach_at_node.
+    std::vector<double> V(ctx.n_target, 0.0);
     for (size_t h = 0; h < ctx.n_target; ++h) {
-        if (n_valid[h] > 0) V[h] /= n_valid[h];
+        if (weight_sum[h] > 0) {
+            V[h] = (chip_sum[h] / weight_sum[h]) * reach_at_node[h];
+        }
     }
     return V;
 }
@@ -321,7 +436,14 @@ Aggregated compute_for(
     Player               target,
     TargetPolicy         policy,
     const Scenario&      scenario,
-    const HandEvaluator& eval) {
+    const HandEvaluator& eval,
+    const BRConfig&      config) {
+    // Seed: use config.seed if non-zero, else random_device for fresh runs.
+    std::uint64_t seed = config.seed;
+    if (seed == 0) {
+        std::random_device rd;
+        seed = (static_cast<std::uint64_t>(rd()) << 32) ^ rd();
+    }
     Ctx ctx{
         .target        = target,
         .opponent      = opponent_of(target),
@@ -332,6 +454,8 @@ Aggregated compute_for(
         .opp_combos    = &scenario.combos_for(opponent_of(target)),
         .n_target      = scenario.combos_for(target).size(),
         .n_opp         = scenario.combos_for(opponent_of(target)).size(),
+        .samples       = config.samples,
+        .rng           = std::mt19937_64{seed},
     };
 
     // Initial reach for opp at root: take the appropriate weights vector
@@ -392,11 +516,16 @@ Aggregated compute_for(
 
 BRResult compute_best_response(
     const Scenario&      s,
-    const HandEvaluator& eval) {
-    const auto oop_br = compute_for(Player::OOP, TargetPolicy::BR, s, eval);
-    const auto ip_br  = compute_for(Player::IP,  TargetPolicy::BR, s, eval);
-    const auto oop_eq = compute_for(Player::OOP, TargetPolicy::Eq, s, eval);
-    const auto ip_eq  = compute_for(Player::IP,  TargetPolicy::Eq, s, eval);
+    const HandEvaluator& eval,
+    BRConfig             config) {
+    const auto oop_br =
+        compute_for(Player::OOP, TargetPolicy::BR, s, eval, config);
+    const auto ip_br  =
+        compute_for(Player::IP,  TargetPolicy::BR, s, eval, config);
+    const auto oop_eq =
+        compute_for(Player::OOP, TargetPolicy::Eq, s, eval, config);
+    const auto ip_eq  =
+        compute_for(Player::IP,  TargetPolicy::Eq, s, eval, config);
 
     BRResult r;
     r.oop_br_values     = oop_br.per_hand;

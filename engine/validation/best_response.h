@@ -26,9 +26,26 @@
 #include "hand_eval.h"
 #include "scenario.h"
 
+#include <cstdint>
 #include <vector>
 
 namespace pt::validation {
+
+struct BRConfig {
+    /// Sampling controls for chance-node traversal:
+    ///   * 0  → exhaustive (current behaviour). Walks every chance child.
+    ///         Exact but O(N_card_branches) per chance node.
+    ///   * >0 → Monte Carlo. At each chance node, sample at most this many
+    ///         random children uniformly without replacement. Standard
+    ///         error scales as 1/√samples; 100 samples ≈ 10% relative,
+    ///         10000 ≈ 1%. Sampling makes BR feasible on full river-depth
+    ///         dumps for SRP-class spots.
+    int      samples = 0;
+    /// Seed for the chance-node RNG. Ignored if `samples == 0`.
+    /// Defaults to 0 = "use std::random_device" (set explicitly for
+    /// reproducibility across runs).
+    uint64_t seed    = 0;
+};
 
 struct BRResult {
     /// V_BR[h] for OOP, in chips. Computed assuming OOP plays max-EV
@@ -64,6 +81,7 @@ struct BRResult {
 /// seconds.
 BRResult compute_best_response(
     const Scenario&      scenario,
-    const HandEvaluator& eval);
+    const HandEvaluator& eval,
+    BRConfig             config = {});
 
 }  // namespace pt::validation

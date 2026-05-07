@@ -31,13 +31,17 @@ void print_usage() {
     std::cerr <<
         "usage: pt-validate --input scenario.json\n"
         "                  [--tables /path/to/poker_tables.bin]\n"
-        "                  [--tolerance 0.01]\n";
+        "                  [--tolerance 0.01]\n"
+        "                  [--samples N]   # 0 = exhaustive (default), >0 = MC\n"
+        "                  [--seed S]      # ignored if --samples 0\n";
 }
 
 struct Args {
-    std::string input;
-    std::string tables;
-    double      tolerance = 0.01;  // 1% of pot
+    std::string   input;
+    std::string   tables;
+    double        tolerance = 0.01;  // 1% of pot
+    int           samples   = 0;     // 0 = exhaustive at chance
+    std::uint64_t seed      = 0;     // 0 = random_device
 };
 
 bool parse_args(int argc, char** argv, Args& out) {
@@ -54,6 +58,14 @@ bool parse_args(int argc, char** argv, Args& out) {
         if (take("--tables",  out.tables))  continue;
         if (a == "--tolerance" && i + 1 < argc) {
             out.tolerance = std::stod(argv[++i]);
+            continue;
+        }
+        if (a == "--samples" && i + 1 < argc) {
+            out.samples = std::stoi(argv[++i]);
+            continue;
+        }
+        if (a == "--seed" && i + 1 < argc) {
+            out.seed = std::stoull(argv[++i]);
             continue;
         }
         if (a == "-h" || a == "--help") {
@@ -116,9 +128,21 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    pt::validation::BRConfig config;
+    config.samples = args.samples;
+    config.seed    = args.seed;
+    if (config.samples > 0) {
+        std::cout << "  MC sampling: up to " << config.samples
+                  << " random children per chance node";
+        if (config.seed != 0) {
+            std::cout << " (seed " << config.seed << ")";
+        }
+        std::cout << "\n";
+    }
+
     pt::validation::BRResult r;
     try {
-        r = pt::validation::compute_best_response(scenario, eval);
+        r = pt::validation::compute_best_response(scenario, eval, config);
     } catch (const std::exception& e) {
         std::cerr << "BR computation failed: " << e.what() << "\n";
         return 2;
