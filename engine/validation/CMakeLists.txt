@@ -22,6 +22,7 @@ if(PT_BUILD_TESTS AND TARGET Catch2::Catch2WithMain)
     add_executable(pt_validation_tests
         tests/test_tiny.cpp
         tests/test_blockers.cpp
+        tests/test_paranoid.cpp
     )
     target_link_libraries(pt_validation_tests PRIVATE
         pt_validation Catch2::Catch2WithMain)
