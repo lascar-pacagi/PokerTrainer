@@ -529,14 +529,19 @@ BRResult compute_best_response(
 
     BRResult r;
     r.oop_br_values     = oop_br.per_hand;
+    r.oop_eq_values     = oop_eq.per_hand;
     r.ip_br_values      = ip_br.per_hand;
+    r.ip_eq_values      = ip_eq.per_hand;
     r.oop_br_aggregate  = oop_br.aggregate;
     r.ip_br_aggregate   = ip_br.aggregate;
     r.oop_eq_aggregate  = oop_eq.aggregate;
     r.ip_eq_aggregate   = ip_eq.aggregate;
     r.oop_br_gain       = r.oop_br_aggregate - r.oop_eq_aggregate;
     r.ip_br_gain        = r.ip_br_aggregate  - r.ip_eq_aggregate;
-    r.br_exploitability = r.oop_br_gain + r.ip_br_gain;
+    // pt-solver convention: half-sum of BR gains, matches the value its
+    // own `compute_exploitability` (utility.rs:286) returns and writes
+    // into the JSON's `exploitability` field.
+    r.br_exploitability = 0.5 * (r.oop_br_gain + r.ip_br_gain);
     return r;
 }
 

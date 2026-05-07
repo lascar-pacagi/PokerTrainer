@@ -155,6 +155,25 @@ int main(int argc, char** argv) {
     std::cout << "  IP  equilibrium value:  " << r.ip_eq_aggregate << "\n";
     std::cout << "  IP  best-response:      " << r.ip_br_aggregate << "\n";
     std::cout << "  IP  BR gain:            " << r.ip_br_gain << "\n";
+    // Per-combo dump for diagnostics.
+    if (r.oop_br_values.size() <= 20) {
+        std::cout << "\n  per-combo OOP V (chip):\n";
+        for (size_t i = 0; i < r.oop_br_values.size(); ++i) {
+            const double eq_v = i < r.oop_eq_values.size() ? r.oop_eq_values[i] : 0.0;
+            std::cout << "    " << scenario.oop_combos[i].original
+                      << ": eq=" << eq_v
+                      << " br=" << r.oop_br_values[i]
+                      << " gain=" << (r.oop_br_values[i] - eq_v) << "\n";
+        }
+        std::cout << "\n  per-combo IP V (chip):\n";
+        for (size_t i = 0; i < r.ip_br_values.size(); ++i) {
+            const double eq_v = i < r.ip_eq_values.size() ? r.ip_eq_values[i] : 0.0;
+            std::cout << "    " << scenario.ip_combos[i].original
+                      << ": eq=" << eq_v
+                      << " br=" << r.ip_br_values[i]
+                      << " gain=" << (r.ip_br_values[i] - eq_v) << "\n";
+        }
+    }
     std::cout << "\n  BR-measured exploitability: " << r.br_exploitability
               << " chips\n";
     std::cout << "  pt-solver claimed:          " << scenario.exploitability

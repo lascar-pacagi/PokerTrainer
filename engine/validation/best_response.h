@@ -8,6 +8,28 @@
 // follows the strategy embedded in the JSON, and the BR-er plays the
 // EV-maximising action.
 //
+// **Precision regime — read this before interpreting results:**
+//
+//   * **All 5 board cards pinned (no chance walk):** validator is exact.
+//     Agreement with pt-solver's claimed exploitability is at floating-
+//     point precision (~1e-6 chips). Use this for rigorous validation.
+//
+//   * **Chance walked (flop or turn pinned only):** validator is
+//     approximate due to pt-solver's suit-isomorphism handling. The
+//     crate's `compute_best_cfv_recursive` applies a per-suit permutation
+//     when summing iso-equivalent chance children
+//     (utility.rs:632–647) — accessed via `pub(crate)` `isomorphic_swap`,
+//     which we can't replicate from outside the crate without reimplementing
+//     the iso logic. We fall back to multiplicity weighting, which is
+//     correct for symmetric ranges but produces small residuals
+//     (~0.1–0.3 chips on a 100-chip pot for SRP-class spots) due to
+//     blocker-iso-class interactions on individual combos. The residual
+//     does NOT shrink with solver convergence.
+//
+//     The validator still catches gross errors (>1% pot) reliably, so
+//     it remains useful for sanity-checking solves. Just don't expect
+//     sub-percent-pot agreement when chance is walked.
+//
 // Recurrence (player p is BR-er, q = opponent of p, h = hand of p):
 //   * Terminal:        V[h] = Σ_h_o oppReach[h_o] · payoff(h, h_o, board, kind)
 //   * Chance:          V[h] = mean over child cards c of V_child(h)
@@ -51,8 +73,10 @@ struct BRResult {
     /// V_BR[h] for OOP, in chips. Computed assuming OOP plays max-EV
     /// at every OOP action node; IP follows the JSON's strategy.
     std::vector<double> oop_br_values;
+    std::vector<double> oop_eq_values;
     /// V_BR[h] for IP, computed symmetrically.
     std::vector<double> ip_br_values;
+    std::vector<double> ip_eq_values;
     /// Range-weighted mean BR value for OOP (Σ root_weight[h]·V_BR[h] / Σ).
     double              oop_br_aggregate;
     double              ip_br_aggregate;
@@ -61,10 +85,12 @@ struct BRResult {
     double              oop_eq_aggregate;
     double              ip_eq_aggregate;
     /// BR-measured exploitability =
-    ///   (oop_br_aggregate − oop_eq_aggregate)
-    /// + (ip_br_aggregate  − ip_eq_aggregate).
-    /// At true equilibrium both deltas are 0; in practice the sum should
-    /// match `Scenario::exploitability` within solver convergence error.
+    ///   ((oop_br_aggregate − oop_eq_aggregate)
+    /// +  (ip_br_aggregate  − ip_eq_aggregate)) / 2.
+    /// **Average** of per-player BR gains, matching pt-solver's
+    /// `compute_exploitability` convention (utility.rs:286). At true
+    /// equilibrium both deltas are 0; in practice this matches
+    /// `Scenario::exploitability` within solver convergence error.
     double              br_exploitability;
     /// Per-player BR gains for diagnostics.
     double              oop_br_gain;     // oop_br_aggregate − oop_eq_aggregate
