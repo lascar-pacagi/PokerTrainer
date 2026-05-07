@@ -79,6 +79,13 @@ class DecisionRecord {
   /// the user's action got appended). Lets us trim the history list back
   /// to this snapshot on undo so the right-rail strip stays consistent.
   final int historyLenAtDecision;
+  /// Pot at this node (chips). Used to scale the verdict tolerance.
+  final int pot;
+  /// Solver convergence error at the time of this decision (= scenario
+  /// exploitability). Sets the floor for treating two actions as
+  /// equilibrium-equivalent: per-action EV gaps within this magnitude are
+  /// indistinguishable from convergence noise.
+  final double convergenceError;
 
   const DecisionRecord({
     required this.scenarioLabel,
@@ -93,11 +100,58 @@ class DecisionRecord {
     required this.mix,
     required this.evs,
     required this.historyLenAtDecision,
+    required this.pot,
+    required this.convergenceError,
   });
 
   String get yourAction => actions[yourActionIdx];
   String get bestAction => actions[bestActionIdx];
   double get evGap => bestEv - yourEv;   // ≥ 0 by construction
+
+  /// EV gap below which two actions are treated as equilibrium-equivalent.
+  ///
+  /// Picks the larger of:
+  ///   * `convergenceError`  — per-class EV drift the solver itself is
+  ///                           accumulating; tighter would falsely flag
+  ///                           floating-point noise as user mistakes.
+  ///   * `pot * 0.01`        — 1% of pot floor; sub-1% gaps are
+  ///                           imperceptible at the table.
+  ///   * `0.05`              — absolute chip floor for tiny pots.
+  double get tolerance {
+    var t = convergenceError;
+    final byPot = pot * 0.01;
+    if (byPot > t) t = byPot;
+    if (t < 0.05) t = 0.05;
+    return t;
+  }
+
+  /// Action indices whose EV is within `tolerance` of the EV-max — all
+  /// GTO-acceptable per the indifference principle (which says actions in
+  /// the support of a mixed equilibrium have identical EV).
+  List<int> get equivalentActions {
+    final out = <int>[];
+    for (var i = 0; i < evs.length; i++) {
+      if (bestEv - evs[i] <= tolerance) out.add(i);
+    }
+    return out;
+  }
+
+  bool get yourActionIsEquilibrium =>
+      equivalentActions.contains(yourActionIdx);
+
+  /// Verdict tiers, used by the UI to color/icon the feedback:
+  ///   * `equilibrium` — within tolerance of the EV-max. The user found a
+  ///                     GTO-acceptable line; argmax is a *reference*, not
+  ///                     the only right answer.
+  ///   * `inaccuracy`  — meaningfully below the equilibrium set, but still
+  ///                     within max(5×tolerance, 5% pot). Sub-blunder.
+  ///   * `mistake`     — beyond the inaccuracy ceiling. Real EV cost.
+  String get verdict {
+    if (yourActionIsEquilibrium) return 'equilibrium';
+    final inaccuracyCeiling = math.max(tolerance * 5.0, pot * 0.05);
+    if (evGap <= inaccuracyCeiling) return 'inaccuracy';
+    return 'mistake';
+  }
 }
 
 /// One action that happened, regardless of who took it. The history strip
@@ -289,6 +343,8 @@ class TrainerSession extends ChangeNotifier {
       // Snapshot history length BEFORE we append anything for this decision.
       // continueAfterFeedback() appends the user's action label later.
       historyLenAtDecision: _history.length,
+      pot: n.pot,
+      convergenceError: _scenario.exploitability,
     );
     _log.add(record);
     _pendingFeedback = record;

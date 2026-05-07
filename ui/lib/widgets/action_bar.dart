@@ -22,47 +22,114 @@ class ActionBar extends StatelessWidget {
     }
 
     final agent = session.agentFor(table.toAct!);
-    if (agent is ModelAgent) {
-      // Auto-stepping happens in GameSession; this just paints a banner so
-      // the user knows the model is "thinking" / has stepped.
+    final isModelTurn = agent is ModelAgent;
+
+    // If a model is to act AND auto-step is on, the model has either already
+    // stepped (and we're in a transitional frame) or it will step before the
+    // next paint. Show a "thinking" banner.
+    if (isModelTurn && session.autoStep) {
       return _disabledBar('${table.toAct!.shortLabel}: ${agent.label} acting…');
     }
 
     final argmax = session.strategy?.argmaxLegalIdx;
     final qs     = session.strategy?.qValues;
+    // Auto-detect probability mode (CFR PolicyNet shim) so we can display
+    // labels as percentages in the action buttons too.
+    final isProbability = qs != null && _isProbabilityDistribution(qs);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: const Color(0xFF1B1B1B),
+        color: const Color(0xFF34383B),
         borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: isModelTurn
+              ? const Color(0xFFFFD24A)        // gold border = "model's turn,
+              : const Color(0xFF4A4E52),       //               you're driving"
+          width: isModelTurn ? 1.5 : 1,
+        ),
       ),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          for (int i = 0; i < obs.legal.length; i++)
-            _ActionButton(
-              label: _labelFor(obs.legal[i], obs.sizingForLegal(i), table),
-              subLabel: qs != null
-                  ? 'Q ${qs[i].toStringAsFixed(2)}'
-                  : null,
-              isArgmax: argmax == i,
-              isFold: obs.legal[i] == ActionType.fold,
-              isAllIn: obs.legal[i] == ActionType.allIn,
-              onTap: () => session.applyLegal(i),
+          if (isModelTurn) ...[
+            // Manual-step mode: tell the user what's happening + give a
+            // "take model's pick" shortcut.
+            Padding(
+              padding: const EdgeInsets.fromLTRB(2, 2, 2, 8),
+              child: Row(
+                children: [
+                  const Icon(Icons.pause_circle,
+                      size: 18, color: Color(0xFFFFD24A)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${table.toAct!.shortLabel}: ${agent.label} '
+                      'is to act — choose any action below, or take the '
+                      'model\'s pick.',
+                      style: const TextStyle(
+                        color: Color(0xCCEAE6D9),
+                        fontSize: 13,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton.icon(
+                    icon: const Icon(Icons.play_arrow, size: 16),
+                    label: const Text("Step model's pick"),
+                    onPressed: () => session.stepModelOnce(),
+                  ),
+                ],
+              ),
             ),
+          ],
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              for (int i = 0; i < obs.legal.length; i++)
+                _ActionButton(
+                  label: _labelFor(obs.legal[i], obs.sizingForLegal(i), table),
+                  subLabel: qs != null
+                      ? (isProbability
+                          ? '${(qs[i] * 100).toStringAsFixed(qs[i] >= 0.10 ? 0 : 1)}%'
+                          : 'Q ${qs[i].toStringAsFixed(2)}')
+                      : null,
+                  isArgmax: argmax == i,
+                  isFold: obs.legal[i] == ActionType.fold,
+                  isAllIn: obs.legal[i] == ActionType.allIn,
+                  onTap: () => session.applyLegal(i),
+                ),
+            ],
+          ),
         ],
       ),
     );
+  }
+
+  /// Mirror of `_isProbabilityDistribution` in main.dart — kept private here
+  /// so widgets/action_bar doesn't need to import the app shell. Heuristic:
+  /// values in [-eps, 1+eps] AND sum ≈ 1.
+  static bool _isProbabilityDistribution(dynamic vs) {
+    final n = vs.length as int;
+    if (n == 0) return false;
+    const eps = 1e-3;
+    double sum = 0.0;
+    for (var i = 0; i < n; i++) {
+      final v = (vs[i] as num).toDouble();
+      if (v < -eps || v > 1.0 + eps) return false;
+      sum += v;
+    }
+    return (sum - 1.0).abs() <= 1e-2;
   }
 
   Widget _disabledBar(String text) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 22),
       decoration: BoxDecoration(
-        color: const Color(0xFF1B1B1B),
+        color: const Color(0xFF34383B),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Center(

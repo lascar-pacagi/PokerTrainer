@@ -194,7 +194,10 @@ class TrainerDecisionSummary extends StatelessWidget {
   }
 
   Widget _row(int i, DecisionRecord r) {
-    final col = _gapColor(r.evGap);
+    // Per-row colour follows the verdict, not the raw EV gap. A 0.4-chip gap
+    // can be either "equilibrium" (within solver tolerance) or "inaccuracy"
+    // depending on the spot — the verdict already accounts for this.
+    final col = _verdictColor(r.verdict);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
       decoration: BoxDecoration(
@@ -234,7 +237,10 @@ class TrainerDecisionSummary extends StatelessWidget {
             child: Text(
               '${r.yourAction}\n${r.yourEv.toStringAsFixed(2)}',
               style: TextStyle(
-                color: r.yourActionIdx == r.bestActionIdx
+                // Green when within the equilibrium set, even if not the
+                // EV-max — the indifference-tolerant version of the
+                // previous "your == best" check.
+                color: r.yourActionIsEquilibrium
                     ? const Color(0xFF6FDC84)
                     : const Color(0xFFEAE6D9),
                 fontFamily: 'monospace',
@@ -275,11 +281,27 @@ class TrainerDecisionSummary extends StatelessWidget {
     );
   }
 
-  /// Same thresholds as the in-decision feedback so the user has a single
-  /// mental scale across screens. Chip-denominated; see trainer_action_panel.
+  /// Total-gap colouring (header). Still chip-denominated because the
+  /// total is summed across decisions of varying tolerance — there's no
+  /// single verdict to fall back on. Calibrated to a typical 60-chip
+  /// starting pot; tweak if you study deeper-stack spots.
   static Color _gapColor(double gap) => gap < 0.5
       ? const Color(0xFF6FDC84)
       : gap < 3.0
           ? const Color(0xFFD4B43F)
           : const Color(0xFFDC6F6F);
+
+  /// Per-decision colour driven by the convergence-aware verdict, so that a
+  /// "0.4-chip gap" gets green (equilibrium) on a 60-chip pot but yellow
+  /// (inaccuracy) on a 4-chip pot.
+  static Color _verdictColor(String verdict) {
+    switch (verdict) {
+      case 'equilibrium':
+        return const Color(0xFF6FDC84);
+      case 'inaccuracy':
+        return const Color(0xFFD4B43F);
+      default: // 'mistake'
+        return const Color(0xFFDC6F6F);
+    }
+  }
 }

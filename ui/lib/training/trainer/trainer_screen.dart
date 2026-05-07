@@ -274,7 +274,19 @@ class _TrainerScreenState extends State<TrainerScreen> {
           ),
         const Spacer(),
         OutlinedButton.icon(
-          onPressed: () => TrainerRangeViewer.show(context, s.scenario),
+          // Pass the live hand context so the modal can show board + your
+          // cards + pot at the top — saves the user from closing it just
+          // to peek at what they're holding.
+          onPressed: () => TrainerRangeViewer.show(
+            context,
+            s.scenario,
+            handContext: TrainerRangeContext(
+              board: s.currentNode.board,
+              yourHand: s.userHandStr,
+              yourSeat: s.userSeat,
+              pot: s.currentNode.pot,
+            ),
+          ),
           icon: const Icon(Icons.grid_view, size: 16),
           label: const Text('Show ranges'),
         ),

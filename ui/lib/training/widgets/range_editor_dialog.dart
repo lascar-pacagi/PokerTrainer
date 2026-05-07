@@ -335,7 +335,20 @@ class _RangeEditorDialogState extends State<RangeEditorDialog> {
             : const Color(0xFFD47B3F)); // offsuit — orange
     final fillAlpha = (w * 0.92).clamp(0.0, 1.0);
     final fill = Color.lerp(const Color(0xFF34383B), baseTint, fillAlpha)!;
-    return Container(
+    final pct = (w * 100).round();
+    final maxCombos = isPair ? 6 : (isSuited ? 4 : 12);
+    final tooltip = w > 0.001
+        ? '$label · $pct% · ${(w * maxCombos).toStringAsFixed(1)} of '
+            '$maxCombos combos active'
+        : '$label · empty';
+    // Wrap the cell in a Tooltip so hovering reveals the per-class weight
+    // even when the cell looks "fully painted" (the in-cell number overlay
+    // only shows for partial weights to avoid label clutter).
+    return Tooltip(
+      message: tooltip,
+      // Long-ish wait so it doesn't pop during fast drag-paint.
+      waitDuration: const Duration(milliseconds: 500),
+      child: Container(
       width: size,
       height: size,
       margin: const EdgeInsets.all(0.5),
@@ -388,6 +401,7 @@ class _RangeEditorDialogState extends State<RangeEditorDialog> {
               ),
             ),
         ],
+      ),
       ),
     );
   }

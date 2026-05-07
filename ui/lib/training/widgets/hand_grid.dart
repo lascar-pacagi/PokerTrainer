@@ -246,16 +246,34 @@ class _GridCell extends StatelessWidget {
   }
 
   String _tooltipText(ChartCell cell, List<ActionStyle> styles) {
+    final maxCombos = _maxCombosForLabel(cell.label);
+    final pctOfClass = maxCombos == 0
+        ? 0.0
+        : (cell.totalWeight / maxCombos) * 100;
     final buf = StringBuffer();
-    buf.writeln('${cell.label}  (weight ${cell.totalWeight.toStringAsFixed(2)})');
+    // Weight expressed two ways: % of the class (intuitive) and raw count
+    // (full disclosure for users wanting to verify combo math). At root
+    // nodes a fully-in-range AA shows "100% (6.0/6 combos)"; at deep
+    // chance-narrowed nodes it might show "65% (3.9/6 combos)".
+    buf.writeln(
+      '${cell.label}  ·  ${pctOfClass.toStringAsFixed(0)}% in range '
+      '(${cell.totalWeight.toStringAsFixed(1)} / $maxCombos combos)',
+    );
     for (int a = 0; a < cell.actionFreqs.length; a++) {
       final f = cell.actionFreqs[a];
       if (f < 0.001) continue;
       buf.writeln(
         '  ${styles[a].longLabel}: ${(f * 100).toStringAsFixed(1)}%  '
-        'EV ${cell.actionEvs[a].toStringAsFixed(1)}',
+        'EV ${cell.actionEvs[a].toStringAsFixed(2)}',
       );
     }
     return buf.toString().trimRight();
+  }
+
+  /// Maximum combo count for a given hand-class label.
+  /// Pair = 6, suited = 4, offsuit = 12.
+  int _maxCombosForLabel(String label) {
+    if (label.length == 2) return 6;
+    return label.endsWith('s') ? 4 : 12;
   }
 }

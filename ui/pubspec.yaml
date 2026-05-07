@@ -41,6 +41,9 @@ dependencies:
   # Native file-picker (GTK on Linux, Cocoa on macOS, Win32 on Windows).
   file_selector: ^1.0.3
 
+  # SHA1 used to fingerprint solver inputs for output-file naming.
+  crypto: ^3.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

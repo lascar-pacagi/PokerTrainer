@@ -55,6 +55,29 @@ class NodePanel extends StatelessWidget {
   }
 
   Widget _scenarioHeader(Scenario s) {
+    // Convergence assessment. Target is 1% pot (the dialog default); we
+    // consider "converged" anything within 1.5× of that, "partial" up to
+    // 3× target, and "rough" beyond. These thresholds are heuristics — the
+    // user-visible message tells them what to do (bump iterations) when
+    // strategies might still drift.
+    final targetExpl = s.startingPot * 0.01;
+    final ratio = s.exploitability / targetExpl;
+    final Color convColor;
+    final IconData convIcon;
+    final String convLabel;
+    if (ratio <= 1.5) {
+      convColor = const Color(0xFF5FB37A);
+      convIcon = Icons.check_circle;
+      convLabel = 'Converged';
+    } else if (ratio <= 3.0) {
+      convColor = const Color(0xFFD4B43F);
+      convIcon = Icons.warning_amber;
+      convLabel = 'Partial';
+    } else {
+      convColor = const Color(0xFFD47B7B);
+      convIcon = Icons.error_outline;
+      convLabel = 'Rough';
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -67,15 +90,52 @@ class NodePanel extends StatelessWidget {
           ),
           overflow: TextOverflow.ellipsis,
         ),
-        const SizedBox(height: 2),
-        Text(
-          'pot ${s.startingPot} · stack ${s.effectiveStack} · '
-          'expl ${s.exploitability.toStringAsFixed(2)}',
-          style: const TextStyle(
-            color: Color(0x88EAE6D9),
-            fontFamily: 'monospace',
-            fontSize: 11,
-          ),
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              'pot ${s.startingPot} · stack ${s.effectiveStack}',
+              style: const TextStyle(
+                color: Color(0x88EAE6D9),
+                fontFamily: 'monospace',
+                fontSize: 11,
+              ),
+            ),
+            Tooltip(
+              message: 'Achieved exploitability ${s.exploitability.toStringAsFixed(2)} chips '
+                  '(target ~${targetExpl.toStringAsFixed(2)} = 1% pot).\n\n'
+                  'Converged → mixed-strategy actions have equal EV (GTO indifference).\n'
+                  'Partial → EVs may still differ by ~0.1–0.5 chips; bump max_iterations.\n'
+                  'Rough → strategies are still moving substantially; re-solve.',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: convColor.withValues(alpha: 0.15),
+                  border: Border.all(color: convColor.withValues(alpha: 0.7), width: 1),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(convIcon, size: 12, color: convColor),
+                    const SizedBox(width: 4),
+                    Text(
+                      '$convLabel ${s.exploitability.toStringAsFixed(2)}',
+                      style: TextStyle(
+                        color: convColor,
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ],
     );
@@ -99,18 +159,19 @@ class NodePanel extends StatelessWidget {
         color: const Color(0xFF34383B),
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Row(
+      // Wrap (not Row) so the kv chips + "to act" badge flow naturally and
+      // drop to a second line when the rail is too narrow at scaled fonts.
+      // OOP/IP matches the JSON schema; BB/SB pairs it with the positional
+      // name HU players think in. Postflop HU NLHE: BB = OOP, SB = IP.
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           _kv('POT', '${n.pot}'),
-          const SizedBox(width: 14),
-          // OOP/IP is the data label (matches the JSON schema); BB/SB pairs
-          // it with the positional name HU players think in. Postflop in
-          // HU NLHE: BB = OOP, SB = IP.
           _kv('OOP/BB', '${n.stacks[0]}'),
-          const SizedBox(width: 10),
           _kv('IP/SB', '${n.stacks[1]}'),
-          if (n.isAction && n.player != null) ...[
-            const Spacer(),
+          if (n.isAction && n.player != null)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
               decoration: BoxDecoration(
@@ -131,7 +192,6 @@ class NodePanel extends StatelessWidget {
                 ),
               ),
             ),
-          ],
         ],
       ),
     );
@@ -143,7 +203,12 @@ class NodePanel extends StatelessWidget {
     if (oopMass == null || ipMass == null) return const SizedBox.shrink();
     final oopPct = s.oopRootMass > 0 ? oopMass / s.oopRootMass : 0.0;
     final ipPct = s.ipRootMass > 0 ? ipMass / s.ipRootMass : 0.0;
-    return Row(
+    // Wrap to mirror _potStack's defense against narrow-rail overflow at
+    // scaled fonts (chips collapse to a second line if needed).
+    return Wrap(
+      spacing: 8,
+      runSpacing: 6,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         const Text(
           'Range left:',
@@ -154,29 +219,45 @@ class NodePanel extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-        const SizedBox(width: 8),
-        _pctChip('OOP/BB', oopPct, const Color(0xFF6FB3DC)),
-        const SizedBox(width: 6),
-        _pctChip('IP/SB', ipPct, const Color(0xFFDCBE6F)),
+        _pctChip('OOP/BB', oopPct, oopMass, s.oopRootMass,
+            const Color(0xFF6FB3DC)),
+        _pctChip('IP/SB', ipPct, ipMass, s.ipRootMass,
+            const Color(0xFFDCBE6F)),
       ],
     );
   }
 
-  Widget _pctChip(String who, double pct, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        border: Border.all(color: color.withValues(alpha: 0.5), width: 1),
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Text(
-        '$who ${(pct * 100).toStringAsFixed(0)}%',
-        style: TextStyle(
-          color: color,
-          fontFamily: 'monospace',
-          fontSize: 11,
-          fontWeight: FontWeight.w800,
+  /// Range-survival chip with a tooltip showing the underlying combo math.
+  /// `mass` is the raw weight sum here; `rootMass` is the same player's
+  /// weight sum at the scenario root (the "100% of original" reference).
+  Widget _pctChip(String who, double pct, double mass, double rootMass,
+      Color color) {
+    final tooltipMessage = 'Range survival for $who at this node.\n'
+        '${(pct * 100).toStringAsFixed(1)}% of original combos still arrive '
+        'here.\n\n'
+        'Conditional weight ${mass.toStringAsFixed(2)} / '
+        'root ${rootMass.toStringAsFixed(2)}.\n\n'
+        'Lower % means the line is reached only by part of $who\'s starting '
+        'range — combos that fold or take a different action drop their '
+        'reach probability to 0 along the way.';
+    return Tooltip(
+      message: tooltipMessage,
+      waitDuration: const Duration(milliseconds: 350),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.15),
+          border: Border.all(color: color.withValues(alpha: 0.5), width: 1),
+          borderRadius: BorderRadius.circular(3),
+        ),
+        child: Text(
+          '$who ${(pct * 100).toStringAsFixed(0)}%',
+          style: TextStyle(
+            color: color,
+            fontFamily: 'monospace',
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+          ),
         ),
       ),
     );
@@ -344,20 +425,44 @@ class NodePanel extends StatelessWidget {
   }
 
   Widget _overallMix(ScenarioNode n) {
-    // Weighted average over combos: freq[a] = Σ w[h]·strat[h][a] / Σ w[h]
-    final num = List<double>.filled(n.actions.length, 0.0);
+    // Weighted average over combos:
+    //   freq[a] = Σ w[h]·strat[h][a] / Σ w[h]
+    //   ev[a]   = Σ w[h]·ev[h][a]    / Σ w[h]
+    // Both are aggregations over the player's whole conditional range at
+    // this node. The freq is what the chart bars show in aggregate; the EV
+    // surfaces in the legend tooltip so hovering reveals whether actions
+    // are EV-equal (converged) or still drifting.
+    final freqNum = List<double>.filled(n.actions.length, 0.0);
+    final evNum = List<double>.filled(n.actions.length, 0.0);
     double tot = 0;
     for (int h = 0; h < n.weights.length; h++) {
       final w = n.weights[h];
       if (w <= 0) continue;
       tot += w;
       for (int a = 0; a < n.actions.length; a++) {
-        num[a] += w * n.strategy[h][a];
+        freqNum[a] += w * n.strategy[h][a];
+        evNum[a] += w * n.ev[h][a];
       }
     }
     if (tot <= 0) return const SizedBox.shrink();
-    final freqs = [for (final v in num) v / tot];
+    final freqs = [for (final v in freqNum) v / tot];
+    final evs = [for (final v in evNum) v / tot];
     final styles = n.actions.map((a) => styleFor(a, n.pot)).toList();
+
+    // Tooltip text for the stacked bar — explains the aggregation context.
+    final barTooltip = StringBuffer();
+    barTooltip.writeln(
+      'Aggregate strategy across ${n.player == 'oop' ? 'OOP/BB' : 'IP/SB'}\'s '
+      'conditional range here (weight ${tot.toStringAsFixed(2)}).',
+    );
+    for (int a = 0; a < freqs.length; a++) {
+      if (freqs[a] < 0.001) continue;
+      barTooltip.writeln(
+        '  ${styles[a].longLabel}: ${(freqs[a] * 100).toStringAsFixed(1)}%  '
+        'EV ${evs[a].toStringAsFixed(2)}',
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -371,58 +476,72 @@ class NodePanel extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-        // One stacked bar.
-        ClipRRect(
-          borderRadius: BorderRadius.circular(4),
-          child: SizedBox(
-            height: 18,
-            child: Row(
-              children: [
-                for (int a = 0; a < freqs.length; a++)
-                  if (freqs[a] > 0.001)
-                    Expanded(
-                      flex: (freqs[a] * 1000).round(),
-                      child: Container(color: styles[a].color),
-                    ),
-              ],
+        // Stacked bar with a tooltip recapping the per-action breakdown.
+        Tooltip(
+          message: barTooltip.toString().trimRight(),
+          waitDuration: const Duration(milliseconds: 350),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: SizedBox(
+              height: 18,
+              child: Row(
+                children: [
+                  for (int a = 0; a < freqs.length; a++)
+                    if (freqs[a] > 0.001)
+                      Expanded(
+                        flex: (freqs[a] * 1000).round(),
+                        child: Container(color: styles[a].color),
+                      ),
+                ],
+              ),
             ),
           ),
         ),
         const SizedBox(height: 6),
         for (int a = 0; a < freqs.length; a++)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 1),
-            child: Row(
-              children: [
-                Container(
-                  width: 10,
-                  height: 10,
-                  decoration: BoxDecoration(
-                    color: styles[a].color,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    styles[a].longLabel,
-                    style: const TextStyle(
-                      color: Color(0xCCEAE6D9),
-                      fontSize: 12,
+          Tooltip(
+            message: '${styles[a].longLabel}\n'
+                'Frequency ${(freqs[a] * 100).toStringAsFixed(2)}%  ·  '
+                'EV ${evs[a].toStringAsFixed(2)} chips\n\n'
+                'Aggregate over ${n.player == 'oop' ? 'OOP/BB' : 'IP/SB'}\'s '
+                'whole range. At equilibrium, actions in the support of the '
+                'mix have equal EV (GTO indifference); residual gaps mean the '
+                'solve is still converging.',
+            waitDuration: const Duration(milliseconds: 350),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 1),
+              child: Row(
+                children: [
+                  Container(
+                    width: 10,
+                    height: 10,
+                    decoration: BoxDecoration(
+                      color: styles[a].color,
+                      borderRadius: BorderRadius.circular(2),
                     ),
-                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-                Text(
-                  '${(freqs[a] * 100).toStringAsFixed(1)}%',
-                  style: const TextStyle(
-                    color: Color(0xFFEAE6D9),
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      styles[a].longLabel,
+                      style: const TextStyle(
+                        color: Color(0xCCEAE6D9),
+                        fontSize: 12,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-              ],
+                  Text(
+                    '${(freqs[a] * 100).toStringAsFixed(1)}%',
+                    style: const TextStyle(
+                      color: Color(0xFFEAE6D9),
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
       ],

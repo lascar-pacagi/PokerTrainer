@@ -140,7 +140,23 @@ class ComboDetailDialog extends StatelessWidget {
   }
 
   Widget _comboRow(_Row r, List<ActionStyle> styles) {
-    return Padding(
+    // Tooltip recaps the per-combo data with extra precision (3 decimals on
+    // strategy + EV) so users can verify near-equilibrium ties that round
+    // identically at the inline 2-decimal display.
+    final tip = StringBuffer();
+    tip.writeln('${r.combo}  ·  weight ${r.weight.toStringAsFixed(3)}');
+    for (int a = 0; a < r.strategy.length; a++) {
+      final f = r.strategy[a];
+      if (f < 0.001) continue;
+      tip.writeln(
+        '  ${styles[a].longLabel}: ${(f * 100).toStringAsFixed(2)}%  '
+        'EV ${r.ev[a].toStringAsFixed(3)}',
+      );
+    }
+    return Tooltip(
+      message: tip.toString().trimRight(),
+      waitDuration: const Duration(milliseconds: 350),
+      child: Padding(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -217,8 +233,11 @@ class ComboDetailDialog extends StatelessWidget {
                 if (r.strategy[a] > 0.005)
                   Padding(
                     padding: const EdgeInsets.only(right: 12),
+                    // 2 decimals so equilibrium ties don't read as gaps
+                    // due to rounding (e.g. 10.451 vs 10.453 displays as
+                    // "10.45 = 10.45" rather than "10.5 ≠ 10.4").
                     child: Text(
-                      '${styles[a].shortLabel}=${r.ev[a].toStringAsFixed(1)}',
+                      '${styles[a].shortLabel}=${r.ev[a].toStringAsFixed(2)}',
                       style: const TextStyle(
                         color: Color(0xAAEAE6D9),
                         fontFamily: 'monospace',
@@ -229,6 +248,7 @@ class ComboDetailDialog extends StatelessWidget {
             ],
           ),
         ],
+      ),
       ),
     );
   }

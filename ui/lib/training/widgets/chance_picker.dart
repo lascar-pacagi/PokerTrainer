@@ -238,11 +238,14 @@ class _CardGrid extends StatelessWidget {
     final Color bg;
     final Color border;
     VoidCallback? tap;
+    final String tooltipMessage;
 
     if (onBoard) {
       fg = const Color(0x55EAE6D9);
       bg = const Color(0xFF2D3134);
       border = const Color(0xFF4A4E52);
+      tooltipMessage = '$label  ·  already on the board\n'
+          'This card is part of the current runout, so it can\'t be dealt again.';
     } else if (available) {
       fg = isRed ? const Color(0xFFE07A7A) : const Color(0xFFEAE6D9);
       bg = disabled ? const Color(0xFF272A2D) : const Color(0xFF34383B);
@@ -256,13 +259,27 @@ class _CardGrid extends StatelessWidget {
               : () => onPickWalked!(edge);
         }
       }
+      tooltipMessage = isPending
+          ? '$label  ·  click to spawn a subgame solve\n'
+              'Re-runs pt-solver with this card pinned and the conditional '
+              'ranges from this node. The new scenario auto-loads when ready '
+              '(a few seconds).'
+          : '$label  ·  click to descend into this runout\n'
+              'The solver pre-walked this turn card; clicking navigates into '
+              'its action subtree (no new solve).';
     } else {
       fg = const Color(0x33EAE6D9);
       bg = const Color(0xFF272A2D);
       border = const Color(0xFF4A4E52);
+      tooltipMessage = '$label  ·  not in the dump\n'
+          'Either dead due to range overlap, or merged into an isomorphic '
+          'representative card the solver collapsed.';
     }
 
-    return InkWell(
+    return Tooltip(
+      message: tooltipMessage,
+      waitDuration: const Duration(milliseconds: 350),
+      child: InkWell(
       onTap: tap,
       borderRadius: BorderRadius.circular(4),
       child: Container(
@@ -298,6 +315,7 @@ class _CardGrid extends StatelessWidget {
               ),
           ],
         ),
+      ),
       ),
     );
   }

@@ -80,7 +80,12 @@ class SpotConfig {
     this.turnRaise = '2.5x',
     this.riverBet = '50%,a',
     this.riverRaise = '2.5x',
-    this.maxIterations = 50,
+    // 200 iterations gets the SRP fixture from ~5% exploitability down to
+    // ~0.5–1% — close enough for class-level study (action-EV gaps shrink
+    // to ~0.05 chips). 50 iterations was visibly under-converged; users
+    // saw "EV(check) > EV(bet)" alongside "bet 75%", which violates the
+    // indifference principle and signalled a half-baked solve.
+    this.maxIterations = 200,
     this.targetExploitabilityPctPot = 1.0,
     this.depth = SolveDepth.flop,
   });

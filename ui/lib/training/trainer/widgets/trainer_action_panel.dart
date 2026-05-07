@@ -153,33 +153,104 @@ class _Feedback extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = session.pendingFeedback!;
     final n = session.currentNode;
-    final isBest = r.yourActionIdx == r.bestActionIdx;
-    // EV gap colour-coded to set emotional tone before the user reads the
-    // numbers. Thresholds in chips (the unit EVs are stored in by pt-solver).
-    // Calibrated against typical 60-chip starting pots: <0.5 chips ≈ rounding;
-    // 3+ chips is a real mistake.
-    final gapColor = r.evGap < 0.5
-        ? const Color(0xFF6FDC84)
-        : r.evGap < 3.0
-            ? const Color(0xFFD4B43F)
-            : const Color(0xFFDC6F6F);
+    final equivalent = r.equivalentActions.toSet();
+    final yourMixPct = (r.mix[r.yourActionIdx] * 100).round();
+
+    // Verdict-based theming. The verdict already accounts for solver
+    // tolerance — `equilibrium` means "your action is within solver
+    // convergence noise of the EV-max", *not* "exact tie". This is what
+    // separates "you played a 25%-frequency GTO line" from "you lost EV".
+    final Color verdictColor;
+    final IconData verdictIcon;
+    final String headlineText;
+    String? subtitleText;
+    switch (r.verdict) {
+      case 'equilibrium':
+        verdictColor = const Color(0xFF6FDC84);
+        verdictIcon = Icons.check_circle;
+        if (equivalent.length == 1) {
+          headlineText = 'Best play — ${r.yourAction}';
+        } else {
+          // Multiple actions are equilibrium-equivalent. Tell the user
+          // theirs is one of them and how often the GTO mix picks it.
+          headlineText = 'GTO play — ${r.yourAction} ($yourMixPct% in the mix)';
+          final others = equivalent
+              .where((i) => i != r.yourActionIdx)
+              .map((i) => r.actions[i])
+              .toList();
+          subtitleText = others.isEmpty
+              ? null
+              : 'Also equilibrium-equivalent: ${others.join(', ')}';
+        }
+        break;
+      case 'inaccuracy':
+        verdictColor = const Color(0xFFD4B43F);
+        verdictIcon = Icons.info_outline;
+        headlineText = 'Inaccuracy — you played ${r.yourAction}';
+        subtitleText = equivalent.length == 1
+            ? 'Equilibrium play: ${r.actions[r.bestActionIdx]}'
+            : 'Equilibrium plays: '
+                '${equivalent.map((i) => r.actions[i]).join(', ')}';
+        break;
+      default: // 'mistake'
+        verdictColor = const Color(0xFFDC6F6F);
+        verdictIcon = Icons.cancel_outlined;
+        headlineText = 'Mistake — you played ${r.yourAction}';
+        subtitleText = 'Best was ${r.bestAction}';
+    }
+
+    // Side badge: "EV gap" only meaningful when the verdict is non-trivial.
+    // For equilibrium plays, surface the tolerance instead so the user can
+    // see why their tiny EV gap was *not* counted against them.
+    final Widget badge = r.verdict == 'equilibrium'
+        ? Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: verdictColor.withValues(alpha: 0.22),
+              border: Border.all(color: verdictColor, width: 1),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              r.evGap < 0.005
+                  ? 'EV-equal'
+                  : 'EV gap ${r.evGap.toStringAsFixed(2)} '
+                      '< tol ${r.tolerance.toStringAsFixed(2)}',
+              style: TextStyle(
+                color: verdictColor,
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          )
+        : Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: verdictColor.withValues(alpha: 0.22),
+              border: Border.all(color: verdictColor, width: 1),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              'EV gap ${r.evGap.toStringAsFixed(2)} chips',
+              style: TextStyle(
+                color: verdictColor,
+                fontFamily: 'monospace',
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          );
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
-            Icon(
-              isBest ? Icons.check_circle : Icons.info_outline,
-              color: gapColor,
-              size: 22,
-            ),
+            Icon(verdictIcon, color: verdictColor, size: 22),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                isBest
-                    ? 'Best play — ${r.yourAction}'
-                    : 'Best was ${r.bestAction}; you played ${r.yourAction}',
+                headlineText,
                 style: const TextStyle(
                   color: Color(0xFFEAE6D9),
                   fontSize: 14,
@@ -187,27 +258,26 @@ class _Feedback extends StatelessWidget {
                 ),
               ),
             ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: gapColor.withValues(alpha: 0.22),
-                border: Border.all(color: gapColor, width: 1),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                'EV gap ${r.evGap.toStringAsFixed(2)} chips',
-                style: TextStyle(
-                  color: gapColor,
-                  fontFamily: 'monospace',
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
+            badge,
           ],
         ),
+        if (subtitleText != null) ...[
+          const SizedBox(height: 4),
+          Padding(
+            padding: const EdgeInsets.only(left: 30),
+            child: Text(
+              subtitleText,
+              style: const TextStyle(
+                color: Color(0xAAEAE6D9),
+                fontSize: 12,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 12),
-        // Per-action table.
+        // Per-action table. All equilibrium-equivalent actions get the same
+        // green check mark; the EV-max is no longer special.
         for (var a = 0; a < n.actions.length; a++)
           _ActionStatRow(
             label: n.actions[a],
@@ -215,7 +285,7 @@ class _Feedback extends StatelessWidget {
             mix: r.mix[a],
             ev: r.evs[a],
             isUser: a == r.yourActionIdx,
-            isBest: a == r.bestActionIdx,
+            isBest: equivalent.contains(a),
           ),
         const SizedBox(height: 10),
         Align(

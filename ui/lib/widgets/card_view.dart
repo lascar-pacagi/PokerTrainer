@@ -26,6 +26,18 @@ class CardView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // CardView uses fixed-pixel positions (top: 4, left: 5, top: width*0.42)
+    // alongside relative font sizes. A global textScaler > 1.0 grows the
+    // glyphs but not the slots, causing the small suit to overlap the rank.
+    // Force textScaler 1.0 inside the painting so rank/suit/big-suit always
+    // sit where the layout math expects.
+    return MediaQuery(
+      data: MediaQuery.of(context).copyWith(textScaler: TextScaler.noScaling),
+      child: _build(context),
+    );
+  }
+
+  Widget _build(BuildContext context) {
     final h = width * 1.45;
 
     if (_empty) {
@@ -88,12 +100,12 @@ class CardView extends StatelessWidget {
             ),
           ),
           Positioned(
-            top: width * 0.42, left: 5,
+            top: width * 0.50, left: 5,
             child: Text(
               suitCh,
               style: TextStyle(
                 color: fg,
-                fontSize: width * 0.32,
+                fontSize: width * 0.30,
                 height: 1.0,
               ),
             ),
