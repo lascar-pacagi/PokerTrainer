@@ -12,23 +12,28 @@
 //
 //   * **All 5 board cards pinned (no chance walk):** validator is exact.
 //     Agreement with pt-solver's claimed exploitability is at floating-
-//     point precision (~1e-6 chips). Use this for rigorous validation.
+//     point precision (~1e-6 chips on a 100-pot).
 //
-//   * **Chance walked (flop or turn pinned only):** validator is
-//     approximate due to pt-solver's suit-isomorphism handling. The
-//     crate's `compute_best_cfv_recursive` applies a per-suit permutation
-//     when summing iso-equivalent chance children
-//     (utility.rs:632–647) — accessed via `pub(crate)` `isomorphic_swap`,
-//     which we can't replicate from outside the crate without reimplementing
-//     the iso logic. We fall back to multiplicity weighting, which is
-//     correct for symmetric ranges but produces small residuals
-//     (~0.1–0.3 chips on a 100-chip pot for SRP-class spots) due to
-//     blocker-iso-class interactions on individual combos. The residual
-//     does NOT shrink with solver convergence.
+//   * **Chance walked (flop or turn pinned only):** validator uses
+//     iso-aware BR — derives suit-isomorphism classes from the chance
+//     node's board, enumerates the iso variants of each emitted rep
+//     card, and picks up each variant's contribution by combo-index
+//     remap on the rep's value table. Residuals are typically
+//     ~0.01-0.03 chips on a 100-pot for SRP-class spots, traceable
+//     to chip-value normalization noise compounded through nested
+//     chance levels rather than algorithmic disagreement. The
+//     residual is small enough that any real BR-deviation > 0.1%
+//     pot would surface clearly.
 //
-//     The validator still catches gross errors (>1% pot) reliably, so
-//     it remains useful for sanity-checking solves. Just don't expect
-//     sub-percent-pot agreement when chance is walked.
+//     Caveats:
+//     * Requires σ-symmetric ranges (PokerStove class names like
+//       `AKs`, not suit-locked combos like `AhKh`). For asymmetric
+//       ranges, σ(combo) may fall outside the range and the
+//       corresponding iso variant is dropped — same approximate
+//       behaviour pt-solver itself exhibits.
+//     * Iso classes are derived from board suit-counts only (suits
+//       with the same count are interchangeable), matching the
+//       crate's iso strategy.
 //
 // Recurrence (player p is BR-er, q = opponent of p, h = hand of p):
 //   * Terminal:        V[h] = Σ_h_o oppReach[h_o] · payoff(h, h_o, board, kind)
