@@ -3,15 +3,119 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace pt::validation {
 
 namespace {
+
+// ── Suit permutations & isomorphism (independent reimplementation) ─────────
+//
+// pt-solver collapses suit-isomorphic chance children into a single
+// representative; the rep's per-combo value table covers the whole iso
+// class, with non-rep cards reachable by suit-permuting the combo index.
+// To validate without copying pt-solver's `pub(crate)` iso machinery, we
+// derive the iso classes from `node.board` directly (suits with the same
+// number of board cards are isomorphic), then for each rep enumerate iso
+// variants by transposing rep's suit with each other suit in its class.
+//
+// This is the *iso storage* assumption: the rep's value table is invariant
+// under permutations of suits within its iso class. This holds when the
+// underlying ranges are symmetric over those suits — true for any
+// PokerStove-syntax range (which uses class names like `AKs`, never
+// suit-specific shorthands). If ranges contain explicit suit-locked
+// combos (e.g. `AhKh,AsKd`), iso is partially broken; pt-solver still
+// applies it (slight inaccuracy in solve) and so do we.
+
+struct SuitPerm {
+    std::array<uint8_t, 4> map;
+    constexpr Card apply_card(Card c) const {
+        return make_card(rank_of(c), map[suit_of(c)]);
+    }
+};
+
+constexpr SuitPerm kIdentityPerm{{0, 1, 2, 3}};
+
+inline SuitPerm transpose_suits(int a, int b) {
+    SuitPerm p = kIdentityPerm;
+    std::swap(p.map[a], p.map[b]);
+    return p;
+}
+
+/// For a given board, the iso class members for each suit. `members[s]`
+/// is the list of suits that share `s`'s board count (and therefore are
+/// interchangeable in the strategy/EV tables).
+struct IsoInfo {
+    std::array<std::vector<int>, 4> members;
+};
+
+IsoInfo compute_iso_info(const std::vector<Card>& board) {
+    std::array<int, 4> count = {0, 0, 0, 0};
+    for (Card c : board) ++count[suit_of(c)];
+    IsoInfo info;
+    for (int s = 0; s < 4; ++s) {
+        for (int t = 0; t < 4; ++t) {
+            if (count[t] == count[s]) info.members[s].push_back(t);
+        }
+    }
+    return info;
+}
+
+/// One iso variant of a chance rep card: the *actual* dealable card plus
+/// the suit permutation σ such that σ(rep_card) = variant_card. For the
+/// rep itself, σ = identity.
+struct IsoVariant {
+    Card     variant_card;
+    SuitPerm sigma;
+};
+
+std::vector<IsoVariant> enumerate_iso_variants(Card rep_card,
+                                                const IsoInfo& info) {
+    std::vector<IsoVariant> out;
+    const int rep_suit = suit_of(rep_card);
+    const int rank     = rank_of(rep_card);
+    out.reserve(info.members[rep_suit].size());
+    for (int s : info.members[rep_suit]) {
+        const SuitPerm sigma =
+            (s == rep_suit) ? kIdentityPerm : transpose_suits(rep_suit, s);
+        out.push_back({make_card(rank, s), sigma});
+    }
+    return out;
+}
+
+/// For each combo index `i`, find the index `j` such that
+/// `combos[j]` equals σ(combos[i]) (canonical hole-card ordering).
+/// SIZE_MAX if σ(combos[i]) is not in the range — happens only with
+/// non-σ-invariant ranges (asymmetric suit-locked specs).
+std::vector<std::size_t> build_combo_remap(
+    const std::vector<Combo>& combos,
+    const SuitPerm&           sigma) {
+    auto key = [](Card a, Card b) -> uint16_t {
+        if (a > b) std::swap(a, b);
+        return (uint16_t(a) << 8) | b;
+    };
+    std::unordered_map<uint16_t, std::size_t> by_key;
+    by_key.reserve(combos.size() * 2);
+    for (std::size_t i = 0; i < combos.size(); ++i) {
+        by_key[key(combos[i].cards[0], combos[i].cards[1])] = i;
+    }
+    std::vector<std::size_t> remap(combos.size(),
+                                   std::numeric_limits<std::size_t>::max());
+    for (std::size_t i = 0; i < combos.size(); ++i) {
+        const Card a = sigma.apply_card(combos[i].cards[0]);
+        const Card b = sigma.apply_card(combos[i].cards[1]);
+        const auto it = by_key.find(key(a, b));
+        if (it != by_key.end()) remap[i] = it->second;
+    }
+    return remap;
+}
 
 // ── BR DFS context ─────────────────────────────────────────────────────────
 
@@ -201,59 +305,9 @@ std::vector<double> handle_terminal(
     return V;
 }
 
-/// Per-card multiplicity for chance averaging.
-///
-/// pt-solver's tree dump uses suit isomorphism: when N suits have the same
-/// number of board cards, only one representative is emitted per iso
-/// class. To recover the correct chance-node expectation, each rep gets
-/// weighted by its iso-class size — minus any card that the target hand
-/// shares with the iso class (since target's hand blocks those deals).
-///
-/// `iso_class_size_per_suit[s]` = number of suits with the same board
-/// count as `s`. Stored per chance-node since the iso classes change
-/// after each card is dealt.
-struct IsoWeights {
-    std::array<int, 4> iso_class_size_per_suit;
-};
-
-IsoWeights compute_iso_weights(const Node& node) {
-    std::array<int, 4> board_count = {0, 0, 0, 0};
-    for (Card c : node.board) ++board_count[suit_of(c)];
-    IsoWeights w;
-    for (int s = 0; s < 4; ++s) {
-        int n = 0;
-        for (int t = 0; t < 4; ++t) {
-            if (board_count[t] == board_count[s]) ++n;
-        }
-        w.iso_class_size_per_suit[s] = n;
-    }
-    return w;
-}
-
-/// How many actual cards a chance-rep stands for, given target's hand
-/// blocks some. Iso-class size minus (number of target hole cards whose
-/// suit is in this iso class AND whose rank matches the rep card).
-inline int multiplicity_for_target(
-    Card rep_card,
-    const Combo& tc,
-    const IsoWeights& iw) {
-    const int suit = suit_of(rep_card);
-    const int rank = rank_of(rep_card);
-    int m = iw.iso_class_size_per_suit[suit];
-    // Subtract target hole cards that occupy a slot in this iso class.
-    for (Card hc : tc.cards) {
-        if (rank_of(hc) != rank) continue;
-        const int hs = suit_of(hc);
-        if (iw.iso_class_size_per_suit[hs] != m) continue; // different class
-        // hc is in the same iso class as rep — it consumes one slot.
-        --m;
-    }
-    return m < 0 ? 0 : m;
-}
-
-/// Per-h_target sum of unblocked opp_reach at a node — i.e. the cf-value
-/// → chip-value conversion factor at that node. Combos that share a card
-/// with the target's hand or are otherwise blocked contribute 0.
+/// Per-h_target sum of unblocked opp_reach at a node — the cf-value →
+/// chip-value conversion factor at that node. Combos that share a card
+/// with the target's hand contribute 0.
 std::vector<double> compute_sum_reach(
     const std::vector<double>& opp_reach,
     const Ctx&                 ctx) {
@@ -270,14 +324,27 @@ std::vector<double> compute_sum_reach(
     return out;
 }
 
+/// Iso-aware chance averaging.
+///
+/// For each emitted rep card, walk the rep's subtree once → V_chip_at_rep[h]
+/// (per target combo). Then enumerate iso variants of the rep (the actual
+/// dealable cards in the rep's iso class); for each variant, contribute
+/// V_chip_at_rep[σ⁻¹(h)] to h's chance value, where σ is the suit
+/// permutation mapping rep_suit ↔ variant_suit. σ is involutive
+/// (transposition or identity), so σ⁻¹(h) = σ(h).
+///
+/// This replicates pt-solver's `apply_swap`-summing without depending on
+/// its `pub(crate)` iso machinery: we derive iso classes from the chance
+/// node's board, then re-discover the swap permutation by transposition.
+///
+/// MC sampling: pick at most `ctx.samples` random rep cards uniformly
+/// without replacement. Iso variants under each sampled rep are still
+/// fully enumerated — sampling reduces *which* representative subtrees
+/// we walk, not *which* iso-equivalent cards we average within each rep.
 std::vector<double> handle_chance(
     const Node&                node,
     const std::vector<double>& opp_reach,
     const Ctx&                 ctx) {
-    // Pick which chance children to actually visit. Exhaustive (samples==0)
-    // walks them all; Monte Carlo picks `samples` at random without
-    // replacement (Fisher-Yates partial shuffle). Per-h_target validity
-    // (skipping cards in h) is handled inside the loop.
     const size_t n_children = node.children.size();
     std::vector<size_t> indices(n_children);
     std::iota(indices.begin(), indices.end(), size_t{0});
@@ -291,50 +358,84 @@ std::vector<double> handle_chance(
         indices.resize(k);
     }
 
-    const IsoWeights iw = compute_iso_weights(node);
-    // Per-h_target sum_opp_reach at the chance node — used to re-scale
-    // back to cf-value units after averaging chip-values across cards.
+    const IsoInfo iso = compute_iso_info(node.board);
     const auto reach_at_node = compute_sum_reach(opp_reach, ctx);
 
+    // Per-h_target accumulators. We sum chip-values over (rep, variant)
+    // pairs and count valid pairs, then average → V_chip_chance, then
+    // multiply by reach_at_node[h] for cf-value upstream.
     std::vector<double> chip_sum(ctx.n_target, 0.0);
-    std::vector<double> weight_sum(ctx.n_target, 0.0);
+    std::vector<double> count(ctx.n_target, 0.0);
+
+    // Cache combo remaps per σ across reps — same σ shows up many times
+    // (e.g. h↔s swap is the same permutation for every rank's rep on a
+    // {h,s}-iso flop). Keys: pack σ into a 16-bit int.
+    auto perm_key = [](const SuitPerm& p) -> uint16_t {
+        return uint16_t(p.map[0])      | uint16_t(p.map[1]) << 4
+             | uint16_t(p.map[2]) << 8 | uint16_t(p.map[3]) << 12;
+    };
+    std::unordered_map<uint16_t, std::vector<std::size_t>> remap_cache;
+    auto get_remap = [&](const SuitPerm& sigma) -> const std::vector<std::size_t>& {
+        const uint16_t k = perm_key(sigma);
+        auto it = remap_cache.find(k);
+        if (it != remap_cache.end()) return it->second;
+        return remap_cache.emplace(
+            k, build_combo_remap(*ctx.target_combos, sigma)).first->second;
+    };
+
     for (const size_t idx : indices) {
         const auto& edge = node.children[idx];
-        Card dealt = static_cast<Card>(edge.action_idx);
-        // Filter opp combos that contain the dealt card.
+        const Card  rep_card = static_cast<Card>(edge.action_idx);
+
+        // child_reach: opp_reach with combos containing rep_card zeroed.
         std::vector<double> child_reach(opp_reach);
         for (size_t hq = 0; hq < ctx.n_opp; ++hq) {
-            if (combo_contains((*ctx.opp_combos)[hq], dealt)) {
+            if (combo_contains((*ctx.opp_combos)[hq], rep_card)) {
                 child_reach[hq] = 0;
             }
         }
         const auto reach_at_child = compute_sum_reach(child_reach, ctx);
+
         const Node& child = ctx.scenario->node_at(edge.node_id);
-        auto child_v = compute_v_at(child, child_reach, Player::None, ctx);
+        const auto V_cf_at_rep = compute_v_at(child, child_reach, Player::None, ctx);
+
+        // Convert to chip-value at the rep level (so iso-variant
+        // contributions are commensurable across cards with different
+        // post-deal opp_reach totals).
+        std::vector<double> V_chip_at_rep(ctx.n_target, 0.0);
         for (size_t h = 0; h < ctx.n_target; ++h) {
-            const Combo& tc = (*ctx.target_combos)[h];
-            // Iso-class multiplicity, accounting for cards in target's hand.
-            const int m = multiplicity_for_target(dealt, tc, iw);
-            if (m == 0) continue; // target blocks every card in this class
-            // Convert child's cf-value to chip-value (V_cf / sum_opp_reach)
-            // BEFORE averaging across cards. Otherwise blocker-induced
-            // variation in opp_reach across cards corrupts the average:
-            // a card that blocks half of opp's combos has a cf-value
-            // half as large as a non-blocker card, but the same chip
-            // expectation. Without this normalization we'd undercount
-            // those branches.
-            if (reach_at_child[h] <= 0) continue;
-            const double chip_v = child_v[h] / reach_at_child[h];
-            chip_sum[h] += m * chip_v;
-            weight_sum[h] += m;
+            if (reach_at_child[h] > 0) {
+                V_chip_at_rep[h] = V_cf_at_rep[h] / reach_at_child[h];
+            }
+        }
+
+        // For each iso variant of rep, accumulate variant's contribution
+        // into chance V[h]. The variant's value for h equals the rep's
+        // value for σ(h) — provided σ(h) is in target's range.
+        const auto variants = enumerate_iso_variants(rep_card, iso);
+        for (const auto& v : variants) {
+            const auto& remap = get_remap(v.sigma);
+            for (size_t h = 0; h < ctx.n_target; ++h) {
+                const Combo& tc = (*ctx.target_combos)[h];
+                // Variant card cannot be dealt if target holds it.
+                if (combo_contains(tc, v.variant_card)) continue;
+                const std::size_t mapped = remap[h];
+                if (mapped == std::numeric_limits<std::size_t>::max()) {
+                    continue; // σ(h) outside target range (asymmetric range)
+                }
+                if (reach_at_child[mapped] <= 0) continue;
+                chip_sum[h] += V_chip_at_rep[mapped];
+                count[h]   += 1.0;
+            }
         }
     }
-    // Convert mean chip-value back to cf-value units for upstream
-    // propagation: V_cf = V_chip * sum_reach_at_node.
+
+    // V_chip_chance[h] = mean chip-value across all (rep, variant) pairs
+    // valid for h. V_cf_chance[h] = chip × sum_reach_at_node for upstream.
     std::vector<double> V(ctx.n_target, 0.0);
     for (size_t h = 0; h < ctx.n_target; ++h) {
-        if (weight_sum[h] > 0) {
-            V[h] = (chip_sum[h] / weight_sum[h]) * reach_at_node[h];
+        if (count[h] > 0) {
+            V[h] = (chip_sum[h] / count[h]) * reach_at_node[h];
         }
     }
     return V;
