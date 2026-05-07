@@ -15,6 +15,7 @@ option(PT_BUILD_TESTS       "Build Catch2 unit tests"      ON)
 option(PT_BUILD_PY_BINDINGS "Build pybind11 Python module" ON)
 option(PT_BUILD_FFI         "Build C ABI for Flutter FFI"  ON)
 option(PT_BUILD_INFER       "Build LibTorch C++ inference (requires torch)" OFF)
+option(PT_BUILD_VALIDATION  "Build independent BR validator for pt-solver" OFF)
 option(PT_ENABLE_AVX2       "Enable AVX2 fast path"        ON)
 
 # ─── LibTorch detection (runs before FFI so both targets can share it) ──────
@@ -150,4 +151,9 @@ if(PT_BUILD_INFER)
         BUILD_WITH_INSTALL_RPATH TRUE
         BUILD_RPATH "${PT_TORCH_DIR}/lib"
     )
+endif()
+
+# ─── Independent BR validator for pt-solver ─────────────────────────────────
+if(PT_BUILD_VALIDATION)
+    add_subdirectory(validation)
 endif()
