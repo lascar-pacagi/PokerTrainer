@@ -117,6 +117,7 @@ from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
 from .traversal import DEFAULT_MAX_DEPTH, REGRET_SCALE
 from .train import refit_adv_net, train_policy_net, save_checkpoint
+from .probe import run_default_probes, format_probe_line
 
 
 NUM_ACTIONS = 11
@@ -515,6 +516,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-every-iter", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    p.add_argument("--probe-every-iter", type=int, default=1,
+                   help="Run AA / 72o learning probes every N iterations. "
+                        "0 disables. Each probe plays --probe-hands against "
+                        "uniform-random and reports mbb/hand + preflop action "
+                        "mix — a cheap 'is the net learning poker?' signal.")
+    p.add_argument("--probe-hands", type=int, default=400,
+                   help="Hands per probe scenario (AA, then 72o). 400 gives "
+                        "SE ≈ 300 mbb/hand on the AA scenario — fine for "
+                        "tracking a several-bb signal across iterations.")
     p.add_argument("--smoke", action="store_true")
     return p.parse_args()
 
@@ -546,6 +556,8 @@ def main() -> None:
         cfg.model.hidden = 128
         cfg.model.n_layers = 2
         args.checkpoint_every_iter = 1
+        # Shrink probes so smoke still exercises the path but stays quick.
+        args.probe_hands = 40
 
     torch.manual_seed(cfg.run.seed)
     device = torch.device(args.device)
@@ -620,6 +632,22 @@ def main() -> None:
                               use_linear_cfr=use_linear)
             print(f"    loss: first={r['loss_first']:.2f} last={r['loss_last']:.2f} "
                   f"wall={r['wall_s']:.1f}s")
+
+        # ── Learning probes ────────────────────────────────────────────────
+        # Cheap "is the net learning poker?" signal: play the freshly-refit
+        # AdvNets against a uniform-random opponent in two scenarios — the
+        # net dealt AA, and the net dealt 72o. The bb gap between the two
+        # is what tells you the policy is hand-strength-aware.
+        # CFRAdvPolicy(__init__) puts nets in eval mode; we restore train
+        # mode afterwards so the next iteration's refit isn't surprised.
+        if args.probe_every_iter > 0 and t % args.probe_every_iter == 0:
+            results = run_default_probes(adv_nets, device,
+                                         n_hands=args.probe_hands,
+                                         base_seed=cfg.run.seed + t * 7919)
+            for r in results:
+                print(format_probe_line(r, iter_t=t))
+            for net in adv_nets:
+                net.train(True)
 
         if (args.checkpoint_every_iter > 0
                 and t % args.checkpoint_every_iter == 0):
