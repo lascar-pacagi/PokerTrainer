@@ -61,6 +61,61 @@ from evaluate.match import NUM_ACTIONS, SLOT_LABELS
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PREFLOP SITUATION BUCKETING
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Splitting a single "preflop action mix" line by the betting situation the
+# net is *facing* makes the diagnostic far sharper. AA "raising 70% of the
+# time" is uninformative if we don't know which 70% — is it raising opens,
+# folding to 3-bets, what? Per-situation breakdowns answer this.
+#
+# We bucket every preflop decision into one of four spots using only the
+# engine's `invested_this_street` (= chips voluntarily committed by each
+# player on this street, including the blinds). No action-history walk
+# needed:
+#
+#   open      — SB's very first preflop decision (only chip in is the SB blind).
+#   vs_limp   — BB to act, no chips to call (SB completed without raising).
+#   vs_raise  — actor faces a raise but has not voluntarily raised yet itself.
+#               Covers BB facing SB's open, and SB facing BB's limp-raise.
+#   vs_3bet+  — actor already raised this street and is now facing a re-raise.
+#               Covers SB facing a 3-bet, BB facing a 4-bet, and beyond.
+#
+# Blind sizes from engine/src/game_hu.h: SB=50 chips (0.5 bb), BB=100 chips.
+# ═══════════════════════════════════════════════════════════════════════════
+
+PRE_SITUATIONS = ("open", "vs_limp", "vs_raise", "vs_3bet+")
+_PRE_SITUATION_IDX = {s: i for i, s in enumerate(PRE_SITUATIONS)}
+
+_SB_BLIND_CHIPS = 50    # must match HUState::SMALL_BLIND_CHIPS
+_BB_BLIND_CHIPS = 100   # must match HUState::BIG_BLIND_CHIPS
+
+
+def _categorize_preflop(state, actor: int) -> str:
+    """Bucket a preflop decision; see PRE_SITUATIONS block comment above."""
+    actor_inv = int(state.invested_this_street[actor])
+    other_inv = int(state.invested_this_street[1 - actor])
+    to_call = other_inv - actor_inv
+
+    # actor==0 → SB, actor==1 → BB (matches pte.Player enum).
+    if actor == 0 and actor_inv == _SB_BLIND_CHIPS:
+        # SB's only chip in is the forced blind ⇒ no voluntary action yet.
+        return "open"
+    if actor == 1 and to_call == 0:
+        # BB faces nothing to call ⇒ SB limp-completed without raising.
+        return "vs_limp"
+    # From here, to_call > 0 — we're facing a raise of some level.
+    if actor_inv == _BB_BLIND_CHIPS:
+        # Actor's chips in = 1bb. For BB this is "still just the blind"
+        # (never acted), for SB this is "limped earlier" — either way,
+        # there's exactly one raise on the board.
+        return "vs_raise"
+    # Actor invested > 1bb voluntarily ⇒ already raised this street ⇒ this
+    # decision is facing a re-raise.
+    return "vs_3bet+"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # HOLE-CARD PREDICATES
 # ═══════════════════════════════════════════════════════════════════════════
 #
@@ -115,20 +170,36 @@ class ProbeResult:
     seeds_tried: int
     net_bb_total: float        # net's chip delta in BB, summed over all hands and both seats
     elapsed_s: float
+    # Per-situation, per-slot preflop action counts.
+    # Shape (len(PRE_SITUATIONS), NUM_ACTIONS).
     preflop_slot_counts: np.ndarray = field(
-        default_factory=lambda: np.zeros(NUM_ACTIONS, dtype=np.int64))
+        default_factory=lambda: np.zeros((len(PRE_SITUATIONS), NUM_ACTIONS),
+                                         dtype=np.int64))
 
     @property
     def mbb_per_hand(self) -> float:
         return 1000.0 * self.net_bb_total / max(1, self.n_hands)
 
-    def preflop_freq_str(self) -> str:
-        """Compact preflop action distribution, e.g. 'F=0.05  C=0.30  R3x=...'."""
-        n = int(self.preflop_slot_counts.sum())
-        if n == 0:
-            return "n=0"
-        pct = self.preflop_slot_counts.astype(np.float64) / n
-        return "  ".join(f"{lab}={p:.02f}" for lab, p in zip(SLOT_LABELS, pct))
+    def preflop_breakdown_lines(self, indent: str = "       ") -> list[str]:
+        """One line per non-empty preflop situation, percentages across action slots.
+
+        Empty buckets (e.g. vs_3bet+ never reached) are dropped to keep the
+        log compact. The bucket order follows PRE_SITUATIONS (open, vs_limp,
+        vs_raise, vs_3bet+), which is the natural sequence of preflop
+        re-raises and reads top-to-bottom like the betting tree.
+        """
+        lines: list[str] = []
+        col_label_w = max(len(s) for s in PRE_SITUATIONS)
+        for i, sit in enumerate(PRE_SITUATIONS):
+            counts = self.preflop_slot_counts[i]
+            n = int(counts.sum())
+            if n == 0:
+                continue
+            pct = counts.astype(np.float64) / n
+            cells = " ".join(f"{lab}={p:.02f}"
+                             for lab, p in zip(SLOT_LABELS, pct))
+            lines.append(f"{indent}{sit:<{col_label_w}}  n={n:<4} {cells}")
+        return lines
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -144,11 +215,16 @@ def _play_one(env,
               preflop_slot_counts: np.ndarray) -> float:
     """Play `env` to terminal. Net sits at `net_seat`; opponent at the other.
 
-    Records the net's preflop action slot. Returns net's payoff in BB.
+    For each preflop decision by the net, bucket by betting situation
+    (open / vs_limp / vs_raise / vs_3bet+) and tally the action slot.
+    Returns net's payoff in BB.
 
     NOTE: street 0 (preflop) is identified by argmax of x[104:108] — same
     convention the match runner uses (evaluate/match.py:148). Postflop
     actions are not recorded; they're noisy and not the diagnostic we want.
+
+    The situation lookup uses `env.state()` BEFORE the action is applied,
+    so the bucket reflects what the actor was facing when it chose.
     """
     while not env.is_terminal():
         actor = int(env.to_act())
@@ -158,7 +234,8 @@ def _play_one(env,
             street = int(np.argmax(obs.x[104:108]))
             if street == 0:
                 slot = int(obs.legal_idx[idx])
-                preflop_slot_counts[slot] += 1
+                sit = _categorize_preflop(env.state(), net_seat)
+                preflop_slot_counts[_PRE_SITUATION_IDX[sit], slot] += 1
         else:
             idx = opp_policy.choose(obs, rng)
         env.step(idx)
@@ -198,7 +275,7 @@ def run_probe(adv_nets: list[torch.nn.Module],
     env = pte.Env(base_seed)
     rng_actions = np.random.default_rng(base_seed ^ 0xCAFEFACE)
 
-    pre_counts = np.zeros(NUM_ACTIONS, dtype=np.int64)
+    pre_counts = np.zeros((len(PRE_SITUATIONS), NUM_ACTIONS), dtype=np.int64)
     net_bb_total = 0.0
     n_played = 0
     n_seeds_tried = 0
@@ -246,9 +323,15 @@ def run_default_probes(adv_nets: list[torch.nn.Module],
 
 
 def format_probe_line(r: ProbeResult, iter_t: int | None = None) -> str:
-    """Single-line summary suitable for the training log."""
+    """Multi-line summary for the training log.
+
+    Line 1: scenario header — label, hand count, seed budget, wall, mbb/hand.
+    Lines 2+: one per non-empty preflop situation bucket (open, vs_limp,
+              vs_raise, vs_3bet+), showing the per-slot action mix the net
+              chose in that situation.
+    """
     prefix = f"[probe iter={iter_t}]" if iter_t is not None else "[probe]"
-    return (f"  {prefix} {r.label}  n={r.n_hands:<4} "
-            f"({r.seeds_tried:>6} seeds, {r.elapsed_s:>4.1f}s)  "
-            f"net={r.mbb_per_hand:+7.0f} mbb/hand  "
-            f"preflop: {r.preflop_freq_str()}")
+    header = (f"  {prefix} {r.label}  n={r.n_hands:<4} "
+              f"({r.seeds_tried:>6} seeds, {r.elapsed_s:>4.1f}s)  "
+              f"net={r.mbb_per_hand:+7.0f} mbb/hand")
+    return "\n".join([header, *r.preflop_breakdown_lines()])
