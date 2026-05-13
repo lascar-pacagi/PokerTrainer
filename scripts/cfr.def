@@ -19,10 +19,12 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     # Copy the entire repo into /opt/pokertrainer. The build below uses it as
     # CWD. This expects scripts/cfr.def to be invoked from the repo root, e.g.:
     #     sudo singularity build pokertrainer-cfr.sif scripts/cfr.def
-    ../engine        /opt/pokertrainer/engine
-    ../trainer       /opt/pokertrainer/trainer
-    ../scripts       /opt/pokertrainer/scripts
-    ../docs          /opt/pokertrainer/docs
+    # NOTE: %files paths are relative to the CWD of `singularity build`,
+    # NOT to the directory containing this .def file — so no `../` here.
+    engine        /opt/pokertrainer/engine
+    trainer       /opt/pokertrainer/trainer
+    scripts       /opt/pokertrainer/scripts
+    docs          /opt/pokertrainer/docs
 
 %post
     set -e
@@ -53,6 +55,11 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     # we fail fast at build time if anything went wrong.
     PYTHONPATH=/opt/pokertrainer/engine/build python3 /opt/pokertrainer/engine/tests/smoke_pybind.py
     PYTHONPATH=/opt/pokertrainer/engine/build python3 /opt/pokertrainer/engine/tests/smoke_clone.py
+    # CFR probe smoke — catches regressions in cfr/probe.py, CFRAdvPolicy,
+    # or the pybind state.hole / invested_this_street API before the cluster
+    # launches a multi-hour training job that would crash on first probe.
+    PYTHONPATH=/opt/pokertrainer/engine/build:/opt/pokertrainer/trainer \
+        python3 /opt/pokertrainer/trainer/tests/smoke_cfr_probe.py
 
 %environment
     export PYTHONPATH=/opt/pokertrainer/engine/build:/opt/pokertrainer/trainer:${PYTHONPATH:-}
