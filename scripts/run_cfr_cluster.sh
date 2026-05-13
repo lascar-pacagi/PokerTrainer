@@ -24,16 +24,22 @@ CKPT_DIR="${2:?ckpt-dir required (e.g. /scratch/$USER/cfr_run)}"
 ACTORS="${ACTORS:-128}"
 ITERS="${ITERS:-1000}"
 K="${K:-5000}"
-ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-4000}"
+ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-5000}"
 POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-50000}"
 HIDDEN="${HIDDEN:-1024}"
 LAYERS="${LAYERS:-10}"
-ADV_CAP="${ADV_CAP:-2000000}"
-POL_CAP="${POL_CAP:-4000000}"
+ADV_CAP="${ADV_CAP:-20000000}"
+POL_CAP="${POL_CAP:-40000000}"
 DEVICE="${DEVICE:-cuda:0}"
 SEED="${SEED:-42}"
 
 mkdir -p "$CKPT_DIR"
+# Singularity's --bind requires an ABSOLUTE destination path. sbatch's
+# $PWD-relative paths (e.g. `run`) pass the bash variable check but fail
+# inside Singularity with "destination must be an absolute path". Resolve
+# now so the rest of the script (and the --ckpt-dir flag) get a path that
+# means the same thing from any CWD.
+CKPT_DIR="$(readlink -f "$CKPT_DIR")"
 
 echo "[run_cfr_cluster] sif=$SIF"
 echo "[run_cfr_cluster] ckpt=$CKPT_DIR"
@@ -57,4 +63,4 @@ singularity exec --nv \
         --policy-capacity     "$POL_CAP" \
         --ckpt-dir            "$CKPT_DIR" \
         --seed                "$SEED" \
-        --checkpoint-every-iter 5
+        --checkpoint-every-iter 10
