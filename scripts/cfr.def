@@ -37,18 +37,24 @@ From: nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
     # PyTorch first — the engine's libpokertrainer.so RUNPATH-links to libtorch.
     pip3 install --no-cache-dir \
         torch --index-url https://download.pytorch.org/whl/cu124
-    pip3 install --no-cache-dir numpy
+    # numpy for trainer; pybind11 for the engine's Python bindings (the
+    # base Ubuntu image has no system pybind11 — find_package would fail).
+    pip3 install --no-cache-dir numpy pybind11
 
     # Build the engine in-place. PT_BUILD_FFI=ON for the C ABI; PT_BUILD_INFER=ON
     # so libpokertrainer.so includes the LibTorch inference symbols (the
     # cluster will not need pt_infer for CFR training itself, but it's nice
     # to have the same .so usable for downstream eval/inspector binaries).
+    # CMAKE_PREFIX_PATH gets both libtorch and pybind11 cmake configs,
+    # ';'-separated (NOT ':' — that's a CMake quirk, see cfr.def history).
     cd /opt/pokertrainer/engine
     rm -rf build
+    TORCH_CMAKE=$(python3 -c 'import torch.utils; print(torch.utils.cmake_prefix_path)')
+    PYBIND11_CMAKE=$(python3 -c 'import pybind11; print(pybind11.get_cmake_dir())')
     cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DPT_BUILD_FFI=ON -DPT_BUILD_INFER=ON \
-        -DCMAKE_PREFIX_PATH="$(python3 -c 'import torch.utils; print(torch.utils.cmake_prefix_path)')"
+        -DCMAKE_PREFIX_PATH="${TORCH_CMAKE};${PYBIND11_CMAKE}"
     cmake --build build -j"$(nproc)"
 
     # Sanity: run the pybind smoke + the new clone smoke INSIDE the image so
