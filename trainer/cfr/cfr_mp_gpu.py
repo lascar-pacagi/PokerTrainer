@@ -104,6 +104,7 @@ from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
 from .traversal import DEFAULT_MAX_DEPTH, REGRET_SCALE
 from .train import refit_adv_net, train_policy_net, save_checkpoint
+from .probe import run_default_probes, format_probe_line
 
 
 # Number of action types. Hardcoded here (also derivable from the engine via
@@ -485,6 +486,13 @@ def parse_args() -> argparse.Namespace:
                    help="cap recursion at this engine history_size; beyond it "
                         "we substitute the AdvNet's σ-weighted regret prediction. "
                         "Default = HIST_MAX = 34.")
+    p.add_argument("--probe-every-iter", type=int, default=1,
+                   help="Run AA / 72o learning probes every N iterations. "
+                        "0 disables. The probe runs on the GPU AdvNets, which "
+                        "is safe wrt the CPU actors — they have their own "
+                        "shared-memory copies and aren't disturbed.")
+    p.add_argument("--probe-hands", type=int, default=400,
+                   help="Hands per probe scenario (AA, then 72o).")
     p.add_argument("--smoke", action="store_true",
                    help="tiny config for end-to-end correctness testing")
     return p.parse_args()
@@ -519,6 +527,8 @@ def main() -> None:
         cfg.model.hidden = 128
         cfg.model.n_layers = 2
         args.checkpoint_every_iter = 1
+        # Shrink probes so smoke still exercises the path but stays quick.
+        args.probe_hands = 40
 
     torch.manual_seed(cfg.run.seed)
     learner_device = torch.device(args.learner_device)
@@ -683,6 +693,22 @@ def main() -> None:
                 if learner_device.type == "cuda":
                     target_cpu = net_cpu_sb if p == 0 else net_cpu_bb
                     sync_cpu_from_gpu(target_cpu, adv_gpu[p])
+
+            # ── Learning probes ────────────────────────────────────────────
+            # Cheap "is the net learning poker?" signal — see cfr/probe.py.
+            # Runs on the GPU AdvNets (adv_gpu); the shared-memory CPU nets
+            # are unaffected, so actors keep pumping out traversals during
+            # the probe just as they do during refit. Bounded-staleness is
+            # already the model here — probe latency is ~1s/scenario.
+            # CFRAdvPolicy puts nets in eval mode; restore train(True) after.
+            if args.probe_every_iter > 0 and t % args.probe_every_iter == 0:
+                results = run_default_probes(adv_gpu, learner_device,
+                                             n_hands=args.probe_hands,
+                                             base_seed=cfg.run.seed + t * 7919)
+                for r in results:
+                    print(format_probe_line(r, iter_t=t))
+                for net in adv_gpu:
+                    net.train(True)
 
             if (args.checkpoint_every_iter > 0
                     and t % args.checkpoint_every_iter == 0):

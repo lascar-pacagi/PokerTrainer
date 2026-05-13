@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Cluster launch wrapper for Deep CFR training inside the Singularity image.
+# Cluster launch wrapper for Deep CFR training (cfr.cfr_coro) inside the
+# Singularity image. ACTORS env var maps to cfr_coro's --n-virtual flag
+# (number of concurrent coroutines / GPU batch size for inference); the
+# 16-64 sweet spot in cfr_coro.py's docstring applies, but the L40S can
+# also absorb 128 fine on a 1024-hidden / 10-layer net.
 #
 # Tested on rtx-8000 (sm_75), A40 (sm_86), L40S (sm_89). All three work with
 # the same .sif (cu124 wheel falls back to fp32/fp16 on Turing — no bf16, but
@@ -50,9 +54,9 @@ nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv
 singularity exec --nv \
     --bind "$CKPT_DIR:$CKPT_DIR" \
     "$SIF" \
-    python3 -m cfr.cfr_mp_gpu \
-        --mp-actors           "$ACTORS" \
-        --learner-device      "$DEVICE" \
+    python3 -m cfr.cfr_coro \
+        --n-virtual           "$ACTORS" \
+        --device              "$DEVICE" \
         --n-iterations        "$ITERS" \
         --n-traversals-per-iter "$K" \
         --adv-grad-steps      "$ADV_GRAD_STEPS" \
