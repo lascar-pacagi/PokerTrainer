@@ -25,13 +25,18 @@ set -euo pipefail
 SIF="${1:?usage: run_cfr_cluster.sh <path-to-sif> <ckpt-dir>}"
 CKPT_DIR="${2:?ckpt-dir required (e.g. /scratch/$USER/cfr_run)}"
 
-ACTORS="${ACTORS:-128}"
+# Defaults sized for the 15-day slurm window on Quadro RTX 8000 (Turing,
+# fp32-only useful tensor cores). With hidden=512 layers=8 + K=1000 the
+# per-iter wall is ~10 min, so 1000 iters fits in ~7 days. Earlier run
+# with hidden=1024 K=5000 measured 4 h/iter → would not finish.
+# Override per-run via env: HIDDEN=1024 LAYERS=10 K=5000 sbatch ...
+ACTORS="${ACTORS:-64}"
 ITERS="${ITERS:-1000}"
-K="${K:-5000}"
+K="${K:-1000}"
 ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-5000}"
 POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-50000}"
-HIDDEN="${HIDDEN:-1024}"
-LAYERS="${LAYERS:-10}"
+HIDDEN="${HIDDEN:-512}"
+LAYERS="${LAYERS:-8}"
 ADV_CAP="${ADV_CAP:-20000000}"
 POL_CAP="${POL_CAP:-40000000}"
 DEVICE="${DEVICE:-cuda:0}"
