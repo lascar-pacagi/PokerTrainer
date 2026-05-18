@@ -92,6 +92,27 @@ class AdvNet(nn.Module):
     Output: (B, NUM_ACTIONS) raw regrets, no activation. Negative values
     are valid (CFR cumulative regrets can be negative); regret-matching
     strips them via clamp(min=0) at policy-derivation time.
+
+    HEAD INITIALIZATION:
+        We zero-init the final Linear (weights + bias = 0) so a freshly-
+        constructed AdvNet returns all-zero regret predictions. This makes
+        `regret_matching_np(zeros, mask)` hit its `z == 0` fallback and
+        return a uniform-over-legal sigma — matching the Brown 2019 Deep CFR
+        paper's "iter 1 uses uniform sigma" prescription without needing
+        special-case code in the traversal.
+
+        Without this, default Kaiming/Xavier init produces small but
+        nonzero noise on the head output. Regret matching of [eps1, eps2,
+        ...] returns a one-hot sigma on whichever slot happens to be the
+        most-positive, which:
+          - breaks tree symmetry (if opponent's degenerate slot is ALL_IN,
+            the traverser's tree truncates near the root),
+          - poisons the iter-1 buffer with extremely skewed sample counts
+            (we observed adv_buf[SB]=1.46M vs adv_buf[BB]=31k in the
+            first cluster run — a 46x imbalance caused by exactly this).
+        With reset_adv_net_each_iter=True (paper default), the head is
+        re-zeroed at the start of every iter's refit; that's fine because
+        refit immediately fills it with meaningful regret targets.
     """
 
     def __init__(self, cfg: CFRModelConfig):
@@ -99,6 +120,8 @@ class AdvNet(nn.Module):
         self.cfg = cfg
         self.trunk = _Trunk(cfg)
         self.head  = nn.Linear(cfg.hidden, cfg.num_actions)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.head(self.trunk(x))
