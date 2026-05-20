@@ -167,6 +167,19 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
                 return out;
             });
 
+    // ─── AppliedAction (one entry of state.history) ─────────────────────────
+    // Exposed read-only — the action history is append-only from the
+    // engine's POV. Token-based encodings (trainer/cfr/tokenize.py) walk
+    // this list chronologically to derive per-action chip-state info.
+    py::class_<pt::AppliedAction>(m, "AppliedAction")
+        .def_readonly("actor",              &pt::AppliedAction::actor)
+        .def_readonly("street",             &pt::AppliedAction::street)
+        .def_readonly("type",               &pt::AppliedAction::type)
+        .def_readonly("bet_to_chips",       &pt::AppliedAction::bet_to_chips)
+        .def_readonly("pot_after_chips",    &pt::AppliedAction::pot_after_chips)
+        .def_readonly("stack_after_chips",  &pt::AppliedAction::stack_after_chips)
+        .def_readonly("was_all_in",         &pt::AppliedAction::was_all_in);
+
     // ─── HUState (read/write — see Phase 2 v2 plan for combo enumeration) ───
     // Fields are read/write so callers can construct synthetic spots:
     // deal() a state, then overwrite `hole` with a candidate combo and
@@ -176,6 +189,7 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
         .def_readwrite("to_act",              &pt::HUState::to_act)
         .def_readwrite("pot_chips",           &pt::HUState::pot_chips)
         .def_readwrite("stacks",              &pt::HUState::stacks)
+        .def_readwrite("starting_stacks",     &pt::HUState::starting_stacks)
         .def_readwrite("invested_this_street",&pt::HUState::invested_this_street)
         .def_readwrite("invested_prior_streets",&pt::HUState::invested_prior_streets)
         .def_readwrite("hole",                &pt::HUState::hole)
@@ -184,6 +198,11 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
         .def_readwrite("payoff_chips",        &pt::HUState::payoff_chips)
         .def_readwrite("actions_this_street", &pt::HUState::actions_this_street)
         .def_readwrite("all_in",              &pt::HUState::all_in)
+        // Full action history. Returned by-value (a copy of the vector) —
+        // tokenization is not in a hot inner loop, so the copy cost is fine.
+        // Each element is a pt::AppliedAction (bound above).
+        .def_property_readonly("history",
+            [](const pt::HUState& self) { return self.history; })
         .def_property_readonly("history_size",
             [](const pt::HUState& self) {
                 return static_cast<int>(self.history.size());

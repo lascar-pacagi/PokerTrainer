@@ -77,6 +77,30 @@ while not env.is_terminal():
 pays = env.payoffs_bb()
 assert pays[0] + pays[1] == 0.0
 
+
+# ─── state.history + AppliedAction bindings ─────────────────────────────────
+# Replay a few actions and assert the history vector is exposed correctly.
+env = pte.Env(seed=4242)
+assert list(env.state().history) == []
+assert list(env.state().starting_stacks) == [10000, 10000]   # 100bb default
+
+env.step_action(pte.ActionType.RAISE_100)   # SB opens
+env.step_action(pte.ActionType.CHECK_CALL)  # BB calls
+
+h = list(env.state().history)
+assert len(h) == 2
+assert h[0].actor == pte.Player.SB
+assert h[0].street == pte.Street.PREFLOP
+assert h[0].type == pte.ActionType.RAISE_100
+assert h[1].actor == pte.Player.BB
+assert h[1].type == pte.ActionType.CHECK_CALL
+# pot grew, stack shrank — basic invariants
+assert h[0].pot_after_chips == 400      # 0.5 SB + 1 BB + 2 SB-raise-to-3 = pot 4bb after R100
+assert h[0].stack_after_chips == 9700
+assert not h[0].was_all_in
+print(f"history bindings OK: {len(h)} entries, "
+      f"final pot_after={h[-1].pot_after_chips}")
+
 # Reproducibility: same seed → same hole cards.
 a = pte.Env(seed=1); a.reset(42)
 b = pte.Env(seed=999); b.reset(42)
