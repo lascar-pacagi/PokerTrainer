@@ -1,4 +1,4 @@
-"""Hyperparameters for Deep CFR training.
+"""Hyperparameters for Deep CFR training (transformer AdvNet/PolicyNet).
 
 Defaults are tuned for a laptop smoke run (small T, small buffer, small net).
 The cluster-scale defaults live in scripts/run_cfr_cluster.sh.
@@ -7,23 +7,36 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .tokenize import VOCAB_SIZE, MAX_SEQ_LEN
+
 
 @dataclass
 class CFRModelConfig:
-    """Both AdvNet and PolicyNet share this trunk shape — only the head differs.
+    """Transformer architecture for AdvNet and PolicyNet.
 
-    AdvNet head:    Linear(hidden → NUM_ACTIONS) — predicts cumulative regret per action.
-    PolicyNet head: Linear(hidden → NUM_ACTIONS) → softmax over legal mask — average strategy.
+    Both nets share a token embedding + transformer trunk; only the head
+    differs (AdvNet outputs raw regrets, PolicyNet outputs masked-softmax
+    probabilities).
+
+    Replaces the previous resmlp_v1 / mlp_v1 flat-vector architecture. See
+    project_token_encoding for the design discussion. Checkpoint format
+    changes (no backward compat with the 816-dim x version).
     """
-    x_dim: int = 816                # must match engine X_DIM (encoding v0.5)
+    # Vocabulary and sequence shape come from the tokenizer to keep them
+    # in lockstep. Bumping vocab/seq requires changes in cfr/tokenize.py.
+    vocab_size: int = VOCAB_SIZE
+    max_seq_len: int = MAX_SEQ_LEN
+
     num_actions: int = 11           # = engine NUM_ACTIONS
-    # Laptop defaults are intentionally small: traversal does ~5k single-state
-    # forwards per hand; the larger the net, the longer each forward takes.
-    # For cluster runs, override via CLI: --hidden 512 --n-layers 8.
-    hidden: int = 128
-    n_layers: int = 2
-    arch: str = "resmlp_v1"         # "mlp_v1" or "resmlp_v1"
-    mlp_expansion: int = 4          # FFN width in resmlp blocks
+
+    # Transformer hyperparameters.
+    d_model: int = 128
+    n_layers: int = 4
+    n_heads: int = 4                # d_model must be divisible by n_heads
+    d_ff: int = 512                 # FFN inner dim; typically 4 * d_model
+    dropout: float = 0.0            # Deep CFR uses MSE on noisy regret
+                                    # targets; dropout adds yet more noise.
+                                    # Leave 0 unless evidence suggests need.
 
 
 @dataclass
@@ -31,8 +44,8 @@ class CFROptimConfig:
     lr: float = 1e-3                # Adam tends to converge faster than RMSProp on regret-MSE
     weight_decay: float = 1e-3      # mild L2 helps with refit-from-scratch stability
     grad_clip: float = 10.0
-    # When refitting AdvNet at each iteration, do `epochs_per_refit` passes
-    # over the buffer with `batch_size` samples per gradient step.
+    # When refitting AdvNet at each iteration, do `n_grad_steps_per_refit` grad
+    # steps with `batch_size` samples per step.
     batch_size: int = 1024
     n_grad_steps_per_refit: int = 4_000
 
