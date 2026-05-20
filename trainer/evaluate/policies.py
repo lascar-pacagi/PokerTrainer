@@ -24,6 +24,7 @@ import pokertrainer_engine as pte
 from dmc.models import DMCNet
 from cfr.models import AdvNet, PolicyNet
 from cfr.regret_matching import regret_matching_np
+from cfr.tokenize import tokenize_state, pad_batch
 
 
 class Policy(Protocol):
@@ -118,7 +119,8 @@ class CFRAdvPolicy:
     NOT the deployable average strategy; for that, use CFRPolicyNetPolicy below.
 
     `match.py` dispatches to `choose_with_seat` automatically (via hasattr),
-    passing the integer seat (0=SB, 1=BB) so the right per-player AdvNet is used.
+    passing the env so the policy can tokenize the current state. Standard
+    policies (RandomPolicy / DMCNet) get the obs-only `choose(obs, rng)` path.
 
     Supports both greedy (argmax of regret-matched strategy) and stochastic
     (sample from regret-matched strategy) action selection.
@@ -138,12 +140,23 @@ class CFRAdvPolicy:
         self.name = name
 
     @torch.no_grad()
-    def choose_with_seat(self, obs, seat: int, rng: np.random.Generator) -> int:
+    def choose_with_seat(self, env, seat: int, rng: np.random.Generator) -> int:
+        """Tokenize the current state and run AdvNet[seat] to derive sigma.
+
+        env is the live engine instance — we need state.history for tokens
+        and state.legal_actions for masking; obs alone (the encoded view)
+        no longer carries the action history in a model-readable form.
+        """
+        obs = env.observation()
         if len(obs.legal) == 1:
             return 0
+        tok_state = tokenize_state(env.state(), seat)
+        tokens_np, pad_mask_np, dpos_np = pad_batch([tok_state])
+        tokens   = torch.from_numpy(tokens_np).to(self.device)
+        pad_mask = torch.from_numpy(pad_mask_np).to(self.device)
+        dpos     = torch.from_numpy(dpos_np).to(self.device)
+        regrets = self.adv_net[seat](tokens, pad_mask, dpos).squeeze(0).cpu().numpy()
         mask = _legal_mask_from_obs(obs)
-        x = torch.from_numpy(obs.x).to(self.device).unsqueeze(0)
-        regrets = self.adv_net[seat](x).squeeze(0).cpu().numpy()
         sigma = regret_matching_np(regrets, mask)         # NUM_ACTIONS-dim
         legal_int = np.array([int(at) for at in obs.legal], dtype=np.int64)
         legal_probs = sigma[legal_int]
@@ -178,13 +191,25 @@ class CFRPolicyNetPolicy:
         self.name = name
 
     @torch.no_grad()
-    def choose(self, obs, rng: np.random.Generator) -> int:
+    def choose_with_env(self, env, rng: np.random.Generator) -> int:
+        """Tokenize current state and sample from PolicyNet's masked softmax.
+
+        Like CFRAdvPolicy, this needs the env (not obs) because tokens are
+        derived from state.history. The to-act player is identified via
+        env.to_act() since PolicyNet isn't per-player.
+        """
+        obs = env.observation()
         if len(obs.legal) == 1:
             return 0
-        mask = _legal_mask_from_obs(obs)
-        x = torch.from_numpy(obs.x).to(self.device).unsqueeze(0)
-        m = torch.from_numpy(mask).to(self.device).unsqueeze(0)
-        probs = self.net(x, m).squeeze(0).cpu().numpy()    # NUM_ACTIONS-dim
+        seat = int(env.to_act())
+        tok_state = tokenize_state(env.state(), seat)
+        tokens_np, pad_mask_np, dpos_np = pad_batch([tok_state])
+        tokens   = torch.from_numpy(tokens_np).to(self.device)
+        pad_mask = torch.from_numpy(pad_mask_np).to(self.device)
+        dpos     = torch.from_numpy(dpos_np).to(self.device)
+        mask     = _legal_mask_from_obs(obs)
+        legal_mask_t = torch.from_numpy(mask).to(self.device).unsqueeze(0)
+        probs = self.net(tokens, pad_mask, dpos, legal_mask_t).squeeze(0).cpu().numpy()
         legal_int = np.array([int(at) for at in obs.legal], dtype=np.int64)
         legal_probs = probs[legal_int]
         z = legal_probs.sum()

@@ -230,7 +230,9 @@ def _play_one(env,
         actor = int(env.to_act())
         obs = env.observation()
         if actor == net_seat:
-            idx = net_policy.choose_with_seat(obs, net_seat, rng)
+            # CFRAdvPolicy now needs env (for token-sequence construction)
+            # instead of obs alone. The street one-hot remains at x[104:108].
+            idx = net_policy.choose_with_seat(env, net_seat, rng)
             street = int(np.argmax(obs.x[104:108]))
             if street == 0:
                 slot = int(obs.legal_idx[idx])

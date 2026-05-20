@@ -136,11 +136,13 @@ def _play_one_hand(env, sb_pol, bb_pol, policy_a,
         actor = env.to_act()
         obs   = env.observation()
         pol   = sb_pol if actor == pte.Player.SB else bb_pol
-        # Seat-aware dispatch: policies that need to know their seat (CFR,
-        # which has a per-player adv net) implement `choose_with_seat`.
-        # Standard policies (DMC, baselines) ignore seat via plain `choose`.
+        # Seat-aware dispatch: CFRAdvPolicy needs env (for tokenization)
+        # AND the seat (per-player AdvNet). CFRPolicyNetPolicy needs env
+        # but no seat. Baselines stay obs-only.
         if hasattr(pol, "choose_with_seat"):
-            idx = pol.choose_with_seat(obs, int(actor), rng)
+            idx = pol.choose_with_seat(env, int(actor), rng)
+        elif hasattr(pol, "choose_with_env"):
+            idx = pol.choose_with_env(env, rng)
         else:
             idx = pol.choose(obs, rng)
         if pol is policy_a:

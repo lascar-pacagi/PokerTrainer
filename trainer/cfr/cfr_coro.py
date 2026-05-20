@@ -115,6 +115,7 @@ from .buffers import ReservoirBuffer
 from .config import CFRConfig
 from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
+from .tokenize import TokenizedState, tokenize_state, pad_batch
 from .traversal import DEFAULT_MAX_DEPTH, REGRET_SCALE
 from .train import refit_adv_net, train_policy_net, save_checkpoint
 from .probe import run_default_probes, format_probe_line
@@ -161,66 +162,53 @@ def traverse_coro(env,
     """Generator-coroutine implementing one external-sampling MCCFR traversal.
 
     YIELDS:
-        (actor: int, x: np.ndarray) tuples, one per inference request.
+        (actor: int, tok_state: TokenizedState) — inference request. The
+        TokenizedState carries the token sequence and the index of the
+        [DECISION] token; the driver batches these together with padding.
     EXPECTS via .send():
         np.ndarray of shape (NUM_ACTIONS,) — predicted regrets for the
         AdvNet of player `actor`.
     RETURNS:
         float — the traverser's expected utility at the root (chip units).
 
-    SEMANTIC EQUIVALENCE TO `traversal.traverse`:
-        Identical algorithm; only the inference call site is different.
-        Where `traversal.traverse` calls `_predict_regrets(net, x, dev)`
-        directly, this function YIELDS the request and resumes when given
-        the prediction. Buffer writes also accumulate to local lists
-        (so the driver can attribute them to a traversal/traverser at
-        completion time) instead of pushing directly to a ReservoirBuffer.
+    Token-based migration (2026-05-20): yields TokenizedState instead of
+    a flat x ndarray. The downstream batcher pads sequences to max-in-batch
+    and runs the transformer over the result. Adv/pol writes store the
+    TokenizedState along with the target so the buffer can replay
+    variable-length sequences at refit time.
     """
-    # ── Terminal: no inference needed, return payoff directly. ────────────
-    # `return X` in a generator raises StopIteration(value=X) at the caller's
-    # `yield from` site (or at .send() in the driver if this is a top-level
-    # coroutine, see _drive_round below).
     if env.is_terminal():
         return float(env.payoffs_bb()[traverser])
 
     obs   = env.observation()
     actor = int(env.to_act())
-    # Defensive copy: the obs.x ndarray is freshly built by pybind11 (see
-    # py_env.cpp:153), so we don't strictly need .copy(). But we're going
-    # to store this in pol_writes/adv_writes, and we want the stored array
-    # to be independent of any future re-evaluation of obs.x. Cheap insurance.
-    x     = obs.x.astype(np.float32, copy=False).copy()
     legal = list(obs.legal)
     n_legal = len(legal)
     mask  = _legal_mask_from_obs(obs)
+    # Tokenize from the to-act player's perspective. The tokenizer pulls
+    # state.history, state.hole, state.board, state.starting_stacks, so the
+    # cost is dominated by the action-history walk (typically <30 entries).
+    tok_state = tokenize_state(env.state(), hero_seat=actor)
 
     # ╔══════════════════════════════════════════════════════════════════════╗
     # ║  THE YIELD POINT — request an inference, suspend until satisfied.   ║
     # ║                                                                      ║
-    # ║  Driver collects this yielded (actor, x), batches with other        ║
-    # ║  coros' yields, runs one GPU forward, and .send()s the result here. ║
-    # ║  This is THE crux of why this file exists.                          ║
+    # ║  Driver collects this yielded (actor, tok_state), batches with other║
+    # ║  coros' yields (padding to max-in-batch), runs one GPU forward, and ║
+    # ║  .send()s the per-row result here.                                   ║
     # ╚══════════════════════════════════════════════════════════════════════╝
-    pred_r = (yield (actor, x))    # type: np.ndarray
+    pred_r = (yield (actor, tok_state))    # type: np.ndarray
     sigma = regret_matching_np(pred_r, mask)
 
-    # Every visited state contributes to the policy buffer (see Deep CFR
-    # algorithm note in traversal.py).
-    pol_writes.append((x, sigma))
+    # Every visited state contributes to the policy buffer.
+    pol_writes.append((tok_state, sigma))
 
     # Depth cap: substitute AdvNet-σ-weighted bootstrap for further recursion.
-    # Multiply by REGRET_SCALE to convert from scaled-regret units back to
-    # chip units (so it integrates correctly with terminal payoffs at higher
-    # recursion levels).
     if env.state().history_size >= max_depth:
         return float((sigma * pred_r * mask).sum()) * REGRET_SCALE
 
     if actor == traverser:
         # ── TRAVERSER NODE: branch every legal action ───────────────────────
-        # Each branch is a separate sub-coroutine via `yield from`. The
-        # driver sees a stream of yields from this generator AS IF they
-        # came from this function body — `yield from` is transparent.
-        # When child returns its value, `v_a` binds to it.
         action_values = np.zeros(NUM_ACTIONS, dtype=np.float32)
         for at in legal:
             child = env.clone()
@@ -231,13 +219,10 @@ def traverse_coro(env,
             action_values[int(at)] = v_a
         v_state = float((sigma * action_values).sum())
         regrets = (action_values - v_state) * mask / REGRET_SCALE
-        adv_writes.append((x, regrets.astype(np.float32, copy=False)))
+        adv_writes.append((tok_state, regrets.astype(np.float32, copy=False)))
         return v_state
 
     # ── OPPONENT NODE: external sampling ────────────────────────────────────
-    # Sample one action, recurse on env in place (no clone needed for a
-    # single-path branch). Use `yield from` to delegate; the recursive
-    # call's return value is THIS function's return value.
     legal_int = np.array([int(at) for at in legal], dtype=np.int64)
     legal_probs = sigma[legal_int]
     z = legal_probs.sum()
@@ -247,11 +232,6 @@ def traverse_coro(env,
         legal_probs = np.full(n_legal, 1.0 / n_legal, dtype=np.float32)
     chosen_local_idx = int(rng.choice(n_legal, p=legal_probs))
     env.step(chosen_local_idx)
-    # Note the parentheses: `return (yield from ...)` — the `yield from`
-    # expression evaluates to the inner traversal's return value, and we
-    # return that. Without parens, Python parses this as `return yield ...`
-    # which is a SyntaxError. Trailing `yield from` returns are common in
-    # coroutine code; the parens are a habit worth forming.
     return (yield from traverse_coro(env, traverser, rng,
                                      adv_writes, pol_writes,
                                      max_depth=max_depth))
@@ -273,10 +253,10 @@ class _Slot:
     """
     env: pte.Env
     coro: Optional[Generator] = None
-    # The next pending request from this coroutine: (actor_player_id, x).
-    # None means: this slot has just finished a traversal and hasn't been
-    # restarted yet (transient state during driver's iteration).
-    pending: Optional[tuple[int, np.ndarray]] = None
+    # The next pending request from this coroutine: (actor_player_id,
+    # TokenizedState). None means: this slot has just finished a traversal
+    # and hasn't been restarted yet (transient state during driver iter).
+    pending: Optional[tuple[int, "TokenizedState"]] = None
     traverser: int = 0
     adv_writes: list = field(default_factory=list)
     pol_writes: list = field(default_factory=list)
@@ -315,29 +295,24 @@ def _start_traversal(slot: _Slot,
 
 
 def _batch_forward(net,
-                   xs: list[np.ndarray],
+                   tok_states: list[TokenizedState],
                    device: torch.device) -> list[np.ndarray]:
-    """Run ONE GPU forward over a list of x-vectors and return per-row outputs.
+    """Run ONE GPU forward over a list of TokenizedStates; return per-row regrets.
 
-    The whole point of this trainer: amortize kernel launch overhead by
-    batching all coroutines' pending requests into one forward.
-
-    np.stack copies into a contiguous (B, X_DIM) ndarray. torch.from_numpy
-    is zero-copy. .to(device, non_blocking=True) starts the H2D transfer
-    while we keep going (next instruction is the forward, which queues
-    behind the transfer on the same CUDA stream).
+    Pads variable-length token sequences to the max in-batch length via
+    `pad_batch`, then runs the transformer once. The model returns raw
+    regrets at the [DECISION] position of each row.
     """
-    if not xs:
+    if not tok_states:
         return []
-    # Stack into (B, x_dim). dtype=float32 already, but explicit for safety.
-    batch_np = np.stack(xs, axis=0).astype(np.float32, copy=False)
-    batch = torch.from_numpy(batch_np).to(device, non_blocking=True)
+    tokens_np, pad_mask_np, dpos_np = pad_batch(tok_states)
+    tokens   = torch.from_numpy(tokens_np).to(device, non_blocking=True)
+    pad_mask = torch.from_numpy(pad_mask_np).to(device, non_blocking=True)
+    dpos     = torch.from_numpy(dpos_np).to(device, non_blocking=True)
     with torch.no_grad():
-        out = net(batch)
-    # .cpu().numpy() forces sync (GPU work to complete before numpy reads it).
-    # This is implicit barrier between batch run and result dispatch.
+        out = net(tokens, pad_mask, dpos)         # (B, NUM_ACTIONS)
     out_np = out.detach().cpu().numpy().astype(np.float32, copy=False)
-    return [out_np[k] for k in range(len(xs))]
+    return [out_np[k] for k in range(len(tok_states))]
 
 
 def _drive_round(slots: list[_Slot],
@@ -360,24 +335,22 @@ def _drive_round(slots: list[_Slot],
         within a single traversal as the betting alternates.
     """
     # Group pending requests by which AdvNet they need.
-    sb_idx: list[int] = []   # slot indices needing AdvNet[0]
-    sb_xs:  list[np.ndarray] = []
+    sb_idx: list[int] = []
+    sb_states: list[TokenizedState] = []
     bb_idx: list[int] = []
-    bb_xs:  list[np.ndarray] = []
+    bb_states: list[TokenizedState] = []
     for i, s in enumerate(slots):
         if s.pending is None:
             continue
-        actor, x = s.pending
+        actor, tok_state = s.pending
         if actor == 0:
-            sb_idx.append(i); sb_xs.append(x)
+            sb_idx.append(i); sb_states.append(tok_state)
         else:
-            bb_idx.append(i); bb_xs.append(x)
+            bb_idx.append(i); bb_states.append(tok_state)
 
-    # ONE forward per AdvNet. We could fuse them (concat both, run one
-    # forward, split) only if the AdvNets shared weights — they don't,
-    # by design (per-player regret functions). So two batches: one each.
-    sb_preds = _batch_forward(adv_nets_gpu[0], sb_xs, device)
-    bb_preds = _batch_forward(adv_nets_gpu[1], bb_xs, device)
+    # ONE forward per AdvNet. AdvNets don't share weights so we can't fuse.
+    sb_preds = _batch_forward(adv_nets_gpu[0], sb_states, device)
+    bb_preds = _batch_forward(adv_nets_gpu[1], bb_states, device)
 
     completed: list[int] = []
 
@@ -463,10 +436,12 @@ def run_K_traversals(K: int,
         for slot_i in completed:
             s = slots[slot_i]
             tr = s.traverser
-            for x, regrets in s.adv_writes:
-                adv_bufs[tr].add(x, regrets, t)
-            for x, sigma in s.pol_writes:
-                pol_buf.add(x, sigma, t)
+            for tok_state, regrets in s.adv_writes:
+                adv_bufs[tr].add(tok_state.tokens, tok_state.decision_pos,
+                                 regrets, t)
+            for tok_state, sigma in s.pol_writes:
+                pol_buf.add(tok_state.tokens, tok_state.decision_pos,
+                            sigma, t)
             n_completed += 1
             if n_completed < K:
                 _start_traversal(s, rng)
@@ -509,8 +484,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--policy-grad-steps", type=int, default=50000)
     p.add_argument("--adv-capacity", type=int, default=2_000_000)
     p.add_argument("--policy-capacity", type=int, default=4_000_000)
-    p.add_argument("--hidden", type=int, default=512)
-    p.add_argument("--n-layers", type=int, default=8)
+    # Transformer hyperparameters (see cfr/config.py:CFRModelConfig).
+    p.add_argument("--d-model", type=int, default=128,
+                   help="transformer hidden dim. Must be divisible by --n-heads.")
+    p.add_argument("--n-layers", type=int, default=4,
+                   help="number of transformer encoder layers")
+    p.add_argument("--n-heads", type=int, default=4,
+                   help="number of attention heads")
+    p.add_argument("--d-ff", type=int, default=512,
+                   help="FFN inner dim (typically 4 * d_model)")
     p.add_argument("--no-linear-cfr", action="store_true")
     p.add_argument("--ckpt-dir", type=str, default="runs/cfr_coro_latest")
     p.add_argument("--checkpoint-every-iter", type=int, default=5)
@@ -541,8 +523,10 @@ def main() -> None:
     cfg.train.policy_n_grad_steps = args.policy_grad_steps
     cfg.buffer.adv_capacity = args.adv_capacity
     cfg.buffer.policy_capacity = args.policy_capacity
-    cfg.model.hidden = args.hidden
+    cfg.model.d_model  = args.d_model
     cfg.model.n_layers = args.n_layers
+    cfg.model.n_heads  = args.n_heads
+    cfg.model.d_ff     = args.d_ff
     use_linear = not args.no_linear_cfr
 
     if args.smoke:
@@ -553,8 +537,10 @@ def main() -> None:
         cfg.train.policy_n_grad_steps = 500
         cfg.buffer.adv_capacity = 10_000
         cfg.buffer.policy_capacity = 10_000
-        cfg.model.hidden = 128
+        cfg.model.d_model = 64
         cfg.model.n_layers = 2
+        cfg.model.n_heads = 4
+        cfg.model.d_ff = 256
         args.checkpoint_every_iter = 1
         # Shrink probes so smoke still exercises the path but stays quick.
         args.probe_hands = 40
@@ -585,15 +571,12 @@ def main() -> None:
     # no IPC payloads — coroutines write into per-traversal lists, the
     # driver drains them inline.
     adv_bufs = [
-        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.x_dim,
-                        cfg.model.num_actions,
+        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.num_actions,
                         rng=np.random.default_rng(cfg.run.seed + 11)),
-        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.x_dim,
-                        cfg.model.num_actions,
+        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.num_actions,
                         rng=np.random.default_rng(cfg.run.seed + 22)),
     ]
-    pol_buf = ReservoirBuffer(cfg.buffer.policy_capacity, cfg.model.x_dim,
-                              cfg.model.num_actions,
+    pol_buf = ReservoirBuffer(cfg.buffer.policy_capacity, cfg.model.num_actions,
                               rng=np.random.default_rng(cfg.run.seed + 33))
 
     rng = np.random.default_rng(cfg.run.seed + 44)
