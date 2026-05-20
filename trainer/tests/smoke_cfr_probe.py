@@ -46,8 +46,10 @@ from evaluate.match import NUM_ACTIONS
 def main() -> None:
     # Tiny CPU nets — we only care about API shape, not learning quality.
     cfg = CFRConfig()
-    cfg.model.hidden = 32
+    cfg.model.d_model = 64
     cfg.model.n_layers = 2
+    cfg.model.n_heads = 4
+    cfg.model.d_ff = 256
     device = torch.device("cpu")
     adv_nets = [AdvNet(cfg.model).to(device), AdvNet(cfg.model).to(device)]
 

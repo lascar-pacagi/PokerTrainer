@@ -142,25 +142,19 @@ def _legal_mask_from_obs(obs) -> np.ndarray:
 
 
 @torch.no_grad()
-def _predict(net, x: np.ndarray) -> np.ndarray:
-    """Single-state CPU forward of an AdvNet.
+def _predict(net, tok_state) -> np.ndarray:
+    """Single-state CPU forward of a transformer AdvNet.
 
-    No `device` parameter — actors are always CPU here. The original
-    `device=cpu` argument was inherited from the laptop trainer's
-    `_predict_regrets` and was vestigial. Removing it makes the actor
-    constraint explicit.
-
-    Conversion path:
-        numpy(x_dim,) → torch.Tensor(1, x_dim) → net forward
-        → torch.Tensor(1, NUM_ACTIONS) → numpy(NUM_ACTIONS,) float32
-
-    The `unsqueeze(0)` adds a batch dimension because nn.Linear expects (B, F).
-    The `squeeze(0)` removes it on output. `.numpy()` is a zero-copy view of
-    the underlying tensor storage when the tensor is on CPU and contiguous —
-    cheap, no allocation.
+    No `device` parameter — actors are always CPU. Wraps the variable-length
+    token sequence into a batch of 1 (pad-trivial since L_max == L) and
+    runs the transformer; returns the row's raw regrets as numpy.
     """
-    xt = torch.from_numpy(x).unsqueeze(0)           # (x_dim,) → (1, x_dim)
-    return net(xt).squeeze(0).numpy().astype(np.float32, copy=False)
+    from .tokenize import pad_batch
+    tokens_np, pad_mask_np, dpos_np = pad_batch([tok_state])
+    tokens   = torch.from_numpy(tokens_np)
+    pad_mask = torch.from_numpy(pad_mask_np)
+    dpos     = torch.from_numpy(dpos_np)
+    return net(tokens, pad_mask, dpos).squeeze(0).numpy().astype(np.float32, copy=False)
 
 
 def _traverse_collect(env, traverser, adv_nets, t, rng,
@@ -198,27 +192,25 @@ def _traverse_collect(env, traverser, adv_nets, t, rng,
     obs   = env.observation()
     actor = int(env.to_act())
 
-    # `obs.x` is a fresh numpy array built by the binding (see py_env.cpp:153
-    # — `arr_to_numpy(self.x)` copies the C++ std::array into a new ndarray).
-    # We .copy() defensively because the array gets stored into `pol_writes_out`
-    # later, and we don't want any future re-binding access to mutate stored
-    # buffer contents. astype() with copy=False would alias the underlying
-    # storage; the explicit .copy() guarantees independence.
-    x     = obs.x.astype(np.float32, copy=False).copy()
     legal = list(obs.legal)
     n_legal = len(legal)
     mask  = _legal_mask_from_obs(obs)
 
-    # CPU forward through the actor's view of the AdvNet for the to-act player.
-    # `adv_nets[actor]` selects which net to call (SB or BB).
-    pred_r = _predict(adv_nets[actor], x)
+    # Tokenize from the to-act player's perspective. The tokenizer walks
+    # state.history; cost is O(action history length).
+    from .tokenize import tokenize_state
+    tok_state = tokenize_state(env.state(), hero_seat=actor)
+
+    # CPU forward through the actor's view of the AdvNet for the to-act
+    # player. `adv_nets[actor]` selects which net to call (SB or BB).
+    pred_r = _predict(adv_nets[actor], tok_state)
     sigma  = regret_matching_np(pred_r, mask)
 
     # Every visited state contributes to the policy buffer regardless of
     # whether the actor is the traverser. This is the "collect average
     # strategy from both seats" rule that makes the PolicyNet converge
     # to the time-averaged σ̄.
-    pol_writes_out.append((x, sigma))
+    pol_writes_out.append((tok_state, sigma))
 
     # Depth cap: substitute AdvNet-σ-weighted value estimate for further
     # recursion. `pred_r` is in scaled-regret units (REGRET_SCALE-divided
@@ -246,7 +238,7 @@ def _traverse_collect(env, traverser, adv_nets, t, rng,
         # comment in `traversal.py` on REGRET_SCALE for the magnitude
         # rationale (keeps Adam loss in a reasonable range).
         regrets = (action_values - v_state) * mask / REGRET_SCALE
-        adv_writes_out.append((x, regrets.astype(np.float32, copy=False)))
+        adv_writes_out.append((tok_state, regrets.astype(np.float32, copy=False)))
         return v_state
 
     # OPPONENT NODE: external sampling — pick ONE action from σ. Don't write
@@ -439,11 +431,12 @@ def _drain_queue(trans_queue: mp.Queue,
         except pyqueue.Empty:
             break
         traverser, adv_writes, pol_writes, t = payload
-        for x, regrets in adv_writes:
-            adv_bufs[traverser].add(x, regrets, t)
+        for tok_state, regrets in adv_writes:
+            adv_bufs[traverser].add(tok_state.tokens, tok_state.decision_pos,
+                                    regrets, t)
             counters["adv_inserts"][traverser] += 1
-        for x, sigma in pol_writes:
-            pol_buf.add(x, sigma, t)
+        for tok_state, sigma in pol_writes:
+            pol_buf.add(tok_state.tokens, tok_state.decision_pos, sigma, t)
             counters["pol_inserts"] += 1
         counters["n_traversals"] += 1
         items += 1
@@ -473,8 +466,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--policy-grad-steps", type=int, default=50000)
     p.add_argument("--adv-capacity", type=int, default=2_000_000)
     p.add_argument("--policy-capacity", type=int, default=4_000_000)
-    p.add_argument("--hidden", type=int, default=512)
-    p.add_argument("--n-layers", type=int, default=8)
+    p.add_argument("--d-model", type=int, default=128,
+                   help="transformer hidden dim. Must be divisible by --n-heads.")
+    p.add_argument("--n-layers", type=int, default=4,
+                   help="number of transformer encoder layers")
+    p.add_argument("--n-heads", type=int, default=4,
+                   help="number of attention heads")
+    p.add_argument("--d-ff", type=int, default=512,
+                   help="FFN inner dim (typically 4 * d_model)")
     p.add_argument("--no-linear-cfr", action="store_true",
                    help="disable Linear CFR weighting (uniform sample weights)")
     p.add_argument("--ckpt-dir", type=str, default="runs/cfr_mp_gpu_latest")
@@ -510,8 +509,10 @@ def main() -> None:
     cfg.train.policy_n_grad_steps = args.policy_grad_steps
     cfg.buffer.adv_capacity = args.adv_capacity
     cfg.buffer.policy_capacity = args.policy_capacity
-    cfg.model.hidden = args.hidden
+    cfg.model.d_model  = args.d_model
     cfg.model.n_layers = args.n_layers
+    cfg.model.n_heads  = args.n_heads
+    cfg.model.d_ff     = args.d_ff
     use_linear = not args.no_linear_cfr
 
     if args.smoke:
@@ -524,8 +525,10 @@ def main() -> None:
         cfg.train.policy_n_grad_steps = 500
         cfg.buffer.adv_capacity = 10_000
         cfg.buffer.policy_capacity = 10_000
-        cfg.model.hidden = 128
+        cfg.model.d_model = 64
         cfg.model.n_layers = 2
+        cfg.model.n_heads = 4
+        cfg.model.d_ff = 256
         args.checkpoint_every_iter = 1
         # Shrink probes so smoke still exercises the path but stays quick.
         args.probe_hands = 40
@@ -588,15 +591,12 @@ def main() -> None:
     # Reservoir buffers live in the learner only. Actors never touch them
     # directly — their writes flow through the queue.
     adv_bufs = [
-        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.x_dim,
-                        cfg.model.num_actions,
+        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.num_actions,
                         rng=np.random.default_rng(cfg.run.seed + 11)),
-        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.x_dim,
-                        cfg.model.num_actions,
+        ReservoirBuffer(cfg.buffer.adv_capacity, cfg.model.num_actions,
                         rng=np.random.default_rng(cfg.run.seed + 22)),
     ]
-    pol_buf = ReservoirBuffer(cfg.buffer.policy_capacity, cfg.model.x_dim,
-                              cfg.model.num_actions,
+    pol_buf = ReservoirBuffer(cfg.buffer.policy_capacity, cfg.model.num_actions,
                               rng=np.random.default_rng(cfg.run.seed + 33))
 
     # ── Multiprocess primitives ─────────────────────────────────────────────
