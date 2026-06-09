@@ -112,7 +112,7 @@ import torch
 import pokertrainer_engine as pte
 
 from .buffers import ReservoirBuffer
-from .config import CFRConfig
+from .config import CFRConfig, BIG_BLIND_CHIPS
 from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
 from .tokenize import TokenizedState, tokenize_state, pad_batch
@@ -158,7 +158,8 @@ def traverse_coro(env,
                   rng: np.random.Generator,
                   adv_writes: list,
                   pol_writes: list,
-                  max_depth: int = DEFAULT_MAX_DEPTH):
+                  max_depth: int = DEFAULT_MAX_DEPTH,
+                  allowed: Optional[frozenset] = None):
     """Generator-coroutine implementing one external-sampling MCCFR traversal.
 
     YIELDS:
@@ -183,8 +184,20 @@ def traverse_coro(env,
     obs   = env.observation()
     actor = int(env.to_act())
     legal = list(obs.legal)
+    if allowed is not None:
+        # Curriculum stage restriction: drop any action the stage forbids.
+        # CHECK_CALL (and ALL_IN) are always legal in HU NLHE, so the filtered
+        # set is never empty. Suppressed slots simply never get branched or
+        # sampled, and never receive a regret target → their AdvNet head row
+        # stays at its zero-init baseline (neutral when a later stage unlocks
+        # the action). See CFRStageConfig.
+        legal = [at for at in legal if int(at) in allowed]
     n_legal = len(legal)
-    mask  = _legal_mask_from_obs(obs)
+    # Build the mask from the (possibly filtered) legal set so regret matching
+    # can put no mass on a forbidden slot.
+    mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+    for at in legal:
+        mask[int(at)] = 1.0
     # Tokenize from the to-act player's perspective. The tokenizer pulls
     # state.history, state.hole, state.board, state.starting_stacks, so the
     # cost is dominated by the action-history walk (typically <30 entries).
@@ -215,7 +228,7 @@ def traverse_coro(env,
             child.step_action(at)
             v_a = yield from traverse_coro(child, traverser, rng,
                                            adv_writes, pol_writes,
-                                           max_depth=max_depth)
+                                           max_depth=max_depth, allowed=allowed)
             action_values[int(at)] = v_a
         v_state = float((sigma * action_values).sum())
         regrets = (action_values - v_state) * mask / REGRET_SCALE
@@ -234,7 +247,7 @@ def traverse_coro(env,
     env.step(chosen_local_idx)
     return (yield from traverse_coro(env, traverser, rng,
                                      adv_writes, pol_writes,
-                                     max_depth=max_depth))
+                                     max_depth=max_depth, allowed=allowed))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -260,6 +273,9 @@ class _Slot:
     traverser: int = 0
     adv_writes: list = field(default_factory=list)
     pol_writes: list = field(default_factory=list)
+    # Curriculum action restriction (frozenset of engine ActionType ints, or
+    # None for the full game). Persisted on the slot so restarts reuse it.
+    allowed: Optional[frozenset] = None
 
 
 def _start_traversal(slot: _Slot,
@@ -280,7 +296,8 @@ def _start_traversal(slot: _Slot,
     slot.adv_writes = []
     slot.pol_writes = []
     slot.coro = traverse_coro(slot.env, slot.traverser, rng,
-                              slot.adv_writes, slot.pol_writes)
+                              slot.adv_writes, slot.pol_writes,
+                              allowed=slot.allowed)
     # Prime: run until first yield. If the traversal is trivial enough to
     # finish without yielding (impossible in practice — every non-terminal
     # state requires inference), we'd catch StopIteration here.
@@ -392,7 +409,9 @@ def run_K_traversals(K: int,
                      rng: np.random.Generator,
                      base_seed: int,
                      device: torch.device,
-                     max_depth: int = DEFAULT_MAX_DEPTH) -> dict:
+                     max_depth: int = DEFAULT_MAX_DEPTH,
+                     starting_stack_chips: Optional[int] = None,
+                     allowed: Optional[frozenset] = None) -> dict:
     """Run K traversals using N_VIRTUAL coroutines in lockstep.
 
     Each completed traversal contributes its accumulated `adv_writes` to
@@ -414,8 +433,16 @@ def run_K_traversals(K: int,
     # Per-slot persistent state. Engine instances are created once and
     # reset() between traversals — avoids the cost of re-allocating the
     # engine's internal RNG state every traversal.
+    def _make_env(seed: int) -> "pte.Env":
+        # Short-stack stages pass an explicit starting stack; the full game
+        # leaves it None and lets the engine use its 100 bb default.
+        if starting_stack_chips is None:
+            return pte.Env(seed)
+        return pte.Env(seed, starting_stack_chips)
+
     slots = [
-        _Slot(env=pte.Env((base_seed + i * 1009 + t * 1234567) & 0xFFFFFFFFFFFFFFFF))
+        _Slot(env=_make_env((base_seed + i * 1009 + t * 1234567) & 0xFFFFFFFFFFFFFFFF),
+              allowed=allowed)
         for i in range(n_virtual)
     ]
     for s in slots:
@@ -498,6 +525,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint-every-iter", type=int, default=5)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    # ── Curriculum stage knobs (see cfr/config.py:CFRStageConfig) ───────────
+    p.add_argument("--starting-stack-bb", type=float, default=100.0,
+                   help="Effective starting stack in big blinds. Stage 1 "
+                        "(push/fold) uses 10. Default 100 = full game.")
+    p.add_argument("--push-fold", action="store_true",
+                   help="Stage-1 action restriction: only FOLD / CHECK_CALL / "
+                        "ALL_IN are legal in traversal. Combine with "
+                        "--starting-stack-bb 10. When set, the training "
+                        "validation compares the net's jam/call ranges against "
+                        "the computed HU Nash push/fold oracle each probe "
+                        "interval (replaces the AA/72o vs-random probe).")
+    p.add_argument("--oracle-deals", type=int, default=12_000_000,
+                   help="Monte-Carlo deals for the push/fold equity matrix the "
+                        "Nash oracle is solved from. Built+cached once; ~80s at "
+                        "the default. Only used with --push-fold.")
     p.add_argument("--probe-every-iter", type=int, default=1,
                    help="Run AA / 72o learning probes every N iterations. "
                         "0 disables. Each probe plays --probe-hands against "
@@ -529,6 +571,13 @@ def main() -> None:
     cfg.model.d_ff     = args.d_ff
     use_linear = not args.no_linear_cfr
 
+    # ── Curriculum stage (see cfr/config.py:CFRStageConfig) ─────────────────
+    cfg.stage.starting_stack_chips = int(round(args.starting_stack_bb * BIG_BLIND_CHIPS))
+    if args.push_fold:
+        cfg.stage.allowed_actions = (int(pte.ActionType.FOLD),
+                                     int(pte.ActionType.CHECK_CALL),
+                                     int(pte.ActionType.ALL_IN))
+
     if args.smoke:
         args.n_virtual = 4
         cfg.train.n_iterations = 2
@@ -544,6 +593,8 @@ def main() -> None:
         args.checkpoint_every_iter = 1
         # Shrink probes so smoke still exercises the path but stays quick.
         args.probe_hands = 40
+        # Tiny oracle so --push-fold smoke doesn't pay the full equity build.
+        args.oracle_deals = 200_000
 
     torch.manual_seed(cfg.run.seed)
     device = torch.device(args.device)
@@ -566,6 +617,29 @@ def main() -> None:
     print(f"[cfr_coro] AdvNet params (each): {count_parameters(adv_nets[0]):,}")
     print(f"[cfr_coro] cfg.model={cfg.model}")
     print(f"[cfr_coro] cfg.train={cfg.train}")
+    print(f"[cfr_coro] cfg.stage={cfg.stage}")
+
+    # Curriculum action restriction as a frozenset (fast membership in the
+    # traversal hot path); None for the full game.
+    allowed = (frozenset(cfg.stage.allowed_actions)
+               if cfg.stage.allowed_actions is not None else None)
+
+    # Stage-1 push/fold: solve the Nash oracle once (cached) so the per-iter
+    # validation has a ground-truth target to score the net's ranges against.
+    pushfold_oracle = None
+    if args.push_fold:
+        from .pushfold_validation import run_pushfold_validation
+        from evaluate.pushfold_solver import build_oracle, format_grid
+        from evaluate.pushfold_reference import format_comparison
+        pushfold_oracle = build_oracle(stack_bb=cfg.stage.starting_stack_bb,
+                                       n_deals=args.oracle_deals)
+        print(format_grid(pushfold_oracle.jam_grid(),
+                          f"[cfr_coro] ORACLE SB open-jam % "
+                          f"({cfg.stage.starting_stack_bb:g}bb Nash):"))
+        # Cross-check the solved oracle against published Nash ranges (a few
+        # boundary hands differ — see pushfold_reference for why that's fine).
+        if abs(cfg.stage.starting_stack_bb - 10.0) < 1e-6:
+            print(format_comparison(pushfold_oracle))
 
     # Buffers live in main process (only process). Direct attribute access,
     # no IPC payloads — coroutines write into per-traversal lists, the
@@ -598,6 +672,8 @@ def main() -> None:
             base_seed=cfg.run.seed + t * 100,
             device=device,
             max_depth=args.max_depth,
+            starting_stack_chips=cfg.stage.starting_stack_chips,
+            allowed=allowed,
         )
         wall = time.time() - t_collect_start
         print(f"  collected K={stats['n_traversals']} in {wall:.1f}s "
@@ -624,11 +700,21 @@ def main() -> None:
         # CFRAdvPolicy(__init__) puts nets in eval mode; we restore train
         # mode afterwards so the next iteration's refit isn't surprised.
         if args.probe_every_iter > 0 and t % args.probe_every_iter == 0:
-            results = run_default_probes(adv_nets, device,
-                                         n_hands=args.probe_hands,
-                                         base_seed=cfg.run.seed + t * 7919)
-            for r in results:
-                print(format_probe_line(r, iter_t=t))
+            if pushfold_oracle is not None:
+                # Stage-1: score the net's whole jam/call range vs Nash.
+                rep = run_pushfold_validation(
+                    adv_nets, device, pushfold_oracle,
+                    starting_stack_chips=cfg.stage.starting_stack_chips,
+                    allowed=allowed)
+                print(rep.grids())
+                for line in rep.summary_lines(iter_t=t):
+                    print(line)
+            else:
+                results = run_default_probes(adv_nets, device,
+                                             n_hands=args.probe_hands,
+                                             base_seed=cfg.run.seed + t * 7919)
+                for r in results:
+                    print(format_probe_line(r, iter_t=t))
             for net in adv_nets:
                 net.train(True)
 

@@ -48,6 +48,26 @@ POL_CAP="${POL_CAP:-40000000}"
 DEVICE="${DEVICE:-cuda:0}"
 SEED="${SEED:-42}"
 
+# ── Curriculum stage 1: short-stack push/fold ───────────────────────────────
+# STACK_BB sets the effective starting stack (bb). PUSH_FOLD=1 restricts the
+# traversal to FOLD/CALL/ALL_IN and switches the per-iter diagnostic to the
+# Nash push/fold range validation (net jam/call grids vs the solved oracle).
+#   STACK_BB=10 PUSH_FOLD=1 bash scripts/run_cfr_cluster.sh <sif> <ckpt>
+# The Nash oracle is solved once from an ORACLE_DEALS-deal equity matrix and
+# cached under $CKPT_DIR/oracle_cache (PT_ORACLE_CACHE).
+STACK_BB="${STACK_BB:-100}"
+PUSH_FOLD="${PUSH_FOLD:-0}"
+ORACLE_DEALS="${ORACLE_DEALS:-12000000}"
+# SINGULARITYENV_ prefix is the reliable way to inject an env var into the
+# container; it appears inside as PT_ORACLE_CACHE. Point it at the bound,
+# writable ckpt dir (the container CWD's runs/ may be read-only).
+export SINGULARITYENV_PT_ORACLE_CACHE="${PT_ORACLE_CACHE:-$CKPT_DIR/oracle_cache}"
+
+STAGE_FLAGS=(--starting-stack-bb "$STACK_BB")
+if [[ "$PUSH_FOLD" == "1" ]]; then
+    STAGE_FLAGS+=(--push-fold --oracle-deals "$ORACLE_DEALS")
+fi
+
 mkdir -p "$CKPT_DIR"
 # Singularity's --bind requires an ABSOLUTE destination path. sbatch's
 # $PWD-relative paths (e.g. `run`) pass the bash variable check but fail
@@ -60,6 +80,7 @@ echo "[run_cfr_cluster] sif=$SIF"
 echo "[run_cfr_cluster] ckpt=$CKPT_DIR"
 echo "[run_cfr_cluster] actors=$ACTORS iters=$ITERS K=$K"
 echo "[run_cfr_cluster] d_model=$D_MODEL layers=$LAYERS heads=$N_HEADS d_ff=$D_FF device=$DEVICE"
+echo "[run_cfr_cluster] stage: stack_bb=$STACK_BB push_fold=$PUSH_FOLD oracle_deals=$ORACLE_DEALS"
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv || true
 
 singularity exec --nv \
@@ -80,4 +101,5 @@ singularity exec --nv \
         --policy-capacity     "$POL_CAP" \
         --ckpt-dir            "$CKPT_DIR" \
         --seed                "$SEED" \
-        --checkpoint-every-iter 10
+        --checkpoint-every-iter 10 \
+        "${STAGE_FLAGS[@]}"

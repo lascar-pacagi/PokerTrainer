@@ -85,6 +85,46 @@ class CFRRunConfig:
     seed: int = 42
 
 
+# Engine chip conventions (must match engine/src/game_hu.h):
+#   1 bb = 100 chips; default starting stack = 100 bb = 10_000 chips.
+BIG_BLIND_CHIPS = 100
+
+
+@dataclass
+class CFRStageConfig:
+    """Curriculum stage: a restriction of the full game the network solves.
+
+    The network architecture is identical across stages — a "stage" only
+    changes (a) how deep the starting stacks are and (b) which engine action
+    types the traversal is allowed to branch on. Because nothing about the
+    weight shapes depends on these, a converged checkpoint from an easier
+    stage is carried forward to the next stage with a plain `load_state_dict`
+    (no net2net widening, no distillation). See project_cfr_token_architecture
+    for why the token-transformer makes this free.
+
+    Defaults reproduce the FULL game (100 bb, every action legal), so runs
+    that don't opt into a stage are unchanged.
+
+    `allowed_actions` is a tuple of engine ActionType integers (see
+    engine/src/action.h: FOLD=0, CHECK_CALL=1, RAISE_25=2 .. RAISE_300=9,
+    ALL_IN=10). `None` means "no restriction — use whatever the engine
+    reports legal". Stage 1 (push/fold) sets this to (0, 1, 10).
+
+    Stored as a tuple (not a set) so it survives pickling into the checkpoint
+    with a stable, log-friendly repr.
+    """
+    starting_stack_chips: int = BIG_BLIND_CHIPS * 100   # 100 bb (full game)
+    allowed_actions: tuple[int, ...] | None = None
+
+    @property
+    def starting_stack_bb(self) -> float:
+        return self.starting_stack_chips / BIG_BLIND_CHIPS
+
+    @property
+    def restricts_actions(self) -> bool:
+        return self.allowed_actions is not None
+
+
 @dataclass
 class CFRConfig:
     model:  CFRModelConfig  = field(default_factory=CFRModelConfig)
@@ -92,3 +132,4 @@ class CFRConfig:
     buffer: CFRBufferConfig = field(default_factory=CFRBufferConfig)
     train:  CFRTrainConfig  = field(default_factory=CFRTrainConfig)
     run:    CFRRunConfig    = field(default_factory=CFRRunConfig)
+    stage:  CFRStageConfig  = field(default_factory=CFRStageConfig)
