@@ -29,4 +29,12 @@ DEFAULT_MAX_DEPTH = 34
 # of its input, so the σ derived from the AdvNet is unchanged. Only the
 # depth-cap value bootstrap needs to multiply by REGRET_SCALE to reconvert
 # the scaled prediction to chip units before mixing with terminal payoffs.
+#
+# IMPORTANT: 100 is correct ONLY for the 100bb game. The right divisor is the
+# effective stack in bb (max payoff swing ≈ ±stack_bb), so cfr_coro derives
+# `regret_scale = cfg.stage.starting_stack_bb` and threads it into traverse_coro
+# — a short-stack stage at 10bb divides by 10, not 100. Using the hard-wired 100
+# at 10bb made every target ~10× too small; with weight_decay the AdvNet
+# underfit to ≈0 and froze at uniform σ. This constant is just the full-game
+# default for callers that don't pass a stage-specific scale.
 REGRET_SCALE = 100.0

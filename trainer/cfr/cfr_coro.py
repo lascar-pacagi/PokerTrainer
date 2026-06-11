@@ -159,7 +159,8 @@ def traverse_coro(env,
                   adv_writes: list,
                   pol_writes: list,
                   max_depth: int = DEFAULT_MAX_DEPTH,
-                  allowed: Optional[frozenset] = None):
+                  allowed: Optional[frozenset] = None,
+                  regret_scale: float = REGRET_SCALE):
     """Generator-coroutine implementing one external-sampling MCCFR traversal.
 
     YIELDS:
@@ -218,7 +219,7 @@ def traverse_coro(env,
 
     # Depth cap: substitute AdvNet-σ-weighted bootstrap for further recursion.
     if env.state().history_size >= max_depth:
-        return float((sigma * pred_r * mask).sum()) * REGRET_SCALE
+        return float((sigma * pred_r * mask).sum()) * regret_scale
 
     if actor == traverser:
         # ── TRAVERSER NODE: branch every legal action ───────────────────────
@@ -228,10 +229,11 @@ def traverse_coro(env,
             child.step_action(at)
             v_a = yield from traverse_coro(child, traverser, rng,
                                            adv_writes, pol_writes,
-                                           max_depth=max_depth, allowed=allowed)
+                                           max_depth=max_depth, allowed=allowed,
+                                           regret_scale=regret_scale)
             action_values[int(at)] = v_a
         v_state = float((sigma * action_values).sum())
-        regrets = (action_values - v_state) * mask / REGRET_SCALE
+        regrets = (action_values - v_state) * mask / regret_scale
         adv_writes.append((tok_state, regrets.astype(np.float32, copy=False)))
         return v_state
 
@@ -247,7 +249,8 @@ def traverse_coro(env,
     env.step(chosen_local_idx)
     return (yield from traverse_coro(env, traverser, rng,
                                      adv_writes, pol_writes,
-                                     max_depth=max_depth, allowed=allowed))
+                                     max_depth=max_depth, allowed=allowed,
+                                     regret_scale=regret_scale))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -276,6 +279,9 @@ class _Slot:
     # Curriculum action restriction (frozenset of engine ActionType ints, or
     # None for the full game). Persisted on the slot so restarts reuse it.
     allowed: Optional[frozenset] = None
+    # Regret-target divisor; should track the effective stack in bb so targets
+    # are O(1) regardless of stack depth (= REGRET_SCALE for the 100bb game).
+    regret_scale: float = REGRET_SCALE
 
 
 def _start_traversal(slot: _Slot,
@@ -297,7 +303,8 @@ def _start_traversal(slot: _Slot,
     slot.pol_writes = []
     slot.coro = traverse_coro(slot.env, slot.traverser, rng,
                               slot.adv_writes, slot.pol_writes,
-                              allowed=slot.allowed)
+                              allowed=slot.allowed,
+                              regret_scale=slot.regret_scale)
     # Prime: run until first yield. If the traversal is trivial enough to
     # finish without yielding (impossible in practice — every non-terminal
     # state requires inference), we'd catch StopIteration here.
@@ -411,7 +418,8 @@ def run_K_traversals(K: int,
                      device: torch.device,
                      max_depth: int = DEFAULT_MAX_DEPTH,
                      starting_stack_chips: Optional[int] = None,
-                     allowed: Optional[frozenset] = None) -> dict:
+                     allowed: Optional[frozenset] = None,
+                     regret_scale: float = REGRET_SCALE) -> dict:
     """Run K traversals using N_VIRTUAL coroutines in lockstep.
 
     Each completed traversal contributes its accumulated `adv_writes` to
@@ -442,7 +450,7 @@ def run_K_traversals(K: int,
 
     slots = [
         _Slot(env=_make_env((base_seed + i * 1009 + t * 1234567) & 0xFFFFFFFFFFFFFFFF),
-              allowed=allowed)
+              allowed=allowed, regret_scale=regret_scale)
         for i in range(n_virtual)
     ]
     for s in slots:
@@ -624,6 +632,14 @@ def main() -> None:
     allowed = (frozenset(cfg.stage.allowed_actions)
                if cfg.stage.allowed_actions is not None else None)
 
+    # Regret-target scale must track the effective stack: max payoff swing is
+    # ±stack_bb, so dividing by stack_bb normalizes targets to O(1). The old
+    # hard-wired REGRET_SCALE=100 was calibrated for the 100bb game and made
+    # short-stack regrets ~10× too small to learn (BB froze at uniform). For
+    # the full game stack_bb=100, so this reproduces the prior behaviour.
+    regret_scale = float(cfg.stage.starting_stack_bb)
+    print(f"[cfr_coro] regret_scale={regret_scale:g} (=effective stack in bb)")
+
     # Stage-1 push/fold: solve the Nash oracle once (cached) so the per-iter
     # validation has a ground-truth target to score the net's ranges against.
     pushfold_oracle = None
@@ -674,6 +690,7 @@ def main() -> None:
             max_depth=args.max_depth,
             starting_stack_chips=cfg.stage.starting_stack_chips,
             allowed=allowed,
+            regret_scale=regret_scale,
         )
         wall = time.time() - t_collect_start
         print(f"  collected K={stats['n_traversals']} in {wall:.1f}s "
