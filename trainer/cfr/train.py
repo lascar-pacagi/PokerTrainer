@@ -61,6 +61,11 @@ def refit_adv_net(net: AdvNet,
         weight   = torch.from_numpy(batch.t).to(device) if use_linear_cfr else None
 
         pred = net(tokens, pad_mask, dpos)                       # (B, NUM_ACTIONS)
+        # NOTE (paper deviation, benign): mean over ALL NUM_ACTIONS slots —
+        # illegal slots carry target 0, so the net also learns "0 on illegal".
+        # This dilutes the printed loss (e.g. 3-legal/11 ⇒ ~8/11 of the terms
+        # are near-zero) but regret matching re-masks at use time. Masking the
+        # loss to legal slots would need the legal mask stored in the buffer.
         per_sample_mse = ((pred - target) ** 2).mean(dim=-1)     # (B,)
         if weight is not None:
             # Normalize weights so the magnitude doesn't drift with iter.

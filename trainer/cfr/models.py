@@ -120,8 +120,9 @@ class AdvNet(nn.Module):
     """Predicts cumulative regret per action from the token sequence.
 
     Head is a Linear(d_model → NUM_ACTIONS). Zero-initialized so a freshly-
-    constructed AdvNet returns all-zero regrets — `regret_matching_np`
-    falls back to uniform-over-legal sigma, mirroring the Brown 2019 Deep
+    constructed AdvNet returns all-zero regrets — `regret_matching_np`'s
+    fallback (highest-regret legal action, exact ties split equally) then
+    degrades to uniform-over-legal sigma, mirroring the Brown 2019 Deep
     CFR paper's "iter 1 uses uniform sigma" prescription without needing a
     t==1 special case in the traversal. See [[cfr-iter1-degenerate-sigma-trap]]
     for the prior incident that motivated this design.

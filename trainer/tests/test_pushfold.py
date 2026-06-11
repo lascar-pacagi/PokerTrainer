@@ -130,21 +130,82 @@ def _drive_zero(coro) -> float:
 
 def test_traversal_action_restriction():
     from cfr.cfr_coro import traverse_coro
+    from cfr.tokenize import ACTION_OFFSET
     allowed = frozenset({_FOLD, _CALL, _ALL_IN})
     rng = np.random.default_rng(0)
     forbidden = [a for a in range(NUM_ACTIONS) if a not in allowed]
-    for seed in range(40):
-        env = pte.Env(seed, 1000)            # 10 bb
-        env.reset(seed)
-        adv_writes, pol_writes = [], []
-        coro = traverse_coro(env, traverser=int(rng.integers(2)), rng=rng,
-                             adv_writes=adv_writes, pol_writes=pol_writes,
-                             allowed=allowed)
-        _drive_zero(coro)
-        for tok_state, regrets in adv_writes:
-            # No regret mass may land on a forbidden slot.
-            assert np.all(regrets[forbidden] == 0.0), regrets
-    print("  action-restricted traversal: no regret on forbidden slots ✓")
+    # Token ids of forbidden ACTIONS — if any appears in a stored sequence,
+    # some player physically played a forbidden action. This catches the
+    # env.step(filtered_idx) bug (filtered index applied against the engine's
+    # unfiltered legal list → opponent's ALL_IN executed as RAISE_25), which
+    # the regret-slot check alone cannot see.
+    forbidden_tokens = {ACTION_OFFSET + a for a in forbidden}
+
+    def drive(coro, answer_vec):
+        try:
+            coro.send(None)
+            while True:
+                coro.send(answer_vec())
+        except StopIteration:
+            pass
+
+    def zeros():
+        return np.zeros(NUM_ACTIONS, dtype=np.float32)
+
+    def jam_seeking():
+        # σ → ALL_IN whenever legal: maximizes opponent jams, the exact path
+        # that exposed the index-mapping bug.
+        r = np.zeros(NUM_ACTIONS, dtype=np.float32)
+        r[_ALL_IN] = 5.0
+        return r
+
+    for answer in (zeros, jam_seeking):
+        for seed in range(40):
+            env = pte.Env(seed, 1000)            # 10 bb
+            env.reset(seed)
+            adv_writes, pol_writes = [], []
+            drive(traverse_coro(env, traverser=int(rng.integers(2)), rng=rng,
+                                adv_writes=adv_writes, pol_writes=pol_writes,
+                                allowed=allowed), answer)
+            for tok_state, regrets in adv_writes:
+                # No regret mass may land on a forbidden slot.
+                assert np.all(regrets[forbidden] == 0.0), regrets
+            for tok_state, _ in adv_writes + pol_writes:
+                toks = set(int(x) for x in tok_state.tokens)
+                assert not (toks & forbidden_tokens), (
+                    f"forbidden action played: tokens {toks & forbidden_tokens}")
+    print("  action-restricted traversal: no forbidden slots OR played actions ✓")
+
+
+def test_regret_matching_paper_fallback():
+    from cfr.regret_matching import regret_matching_np, regret_matching_batch
+    mask = np.zeros(NUM_ACTIONS, dtype=np.float32)
+    for a in (_FOLD, _CALL, _ALL_IN):
+        mask[a] = 1.0
+    # All-zero (zero-init AdvNet): every legal action ties → uniform.
+    sig = regret_matching_np(np.zeros(NUM_ACTIONS, dtype=np.float32), mask)
+    assert np.allclose(sig[[_FOLD, _CALL, _ALL_IN]], 1 / 3), sig
+    # All-negative: paper fallback = argmax with probability 1.
+    r = np.full(NUM_ACTIONS, -5.0, dtype=np.float32)
+    r[_CALL] = -0.1
+    sig = regret_matching_np(r, mask)
+    assert sig[_CALL] == 1.0 and sig[_FOLD] == 0.0 and sig[_ALL_IN] == 0.0, sig
+    # Positive regrets unchanged: proportional over positive part.
+    r = np.zeros(NUM_ACTIONS, dtype=np.float32)
+    r[_CALL], r[_ALL_IN] = 1.0, 3.0
+    sig = regret_matching_np(r, mask)
+    assert np.isclose(sig[_CALL], 0.25) and np.isclose(sig[_ALL_IN], 0.75), sig
+    # Batch variant agrees on all three rows.
+    rows = np.stack([np.zeros(NUM_ACTIONS, dtype=np.float32),
+                     np.full(NUM_ACTIONS, -5.0, dtype=np.float32),
+                     r])
+    rows[1, _CALL] = -0.1
+    sig_b = regret_matching_batch(torch.from_numpy(rows),
+                                  torch.from_numpy(np.tile(mask, (3, 1)))).numpy()
+    for k in range(3):
+        ref = regret_matching_np(rows[k], mask)
+        assert np.allclose(sig_b[k], ref, atol=1e-6), (k, sig_b[k], ref)
+    print("  regret matching: paper argmax fallback + zero-init tie-uniform ✓")
 
 
 # ─── 6. validation read-out on a zero-init net ───────────────────────────────
@@ -175,6 +236,7 @@ def main() -> None:
     test_equity_sanity()
     test_solver_matches_published()
     test_traversal_action_restriction()
+    test_regret_matching_paper_fallback()
     test_validation_zero_init_uniform()
     print("[test_pushfold] all tests passed ✓")
 

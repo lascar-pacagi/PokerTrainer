@@ -206,11 +206,13 @@ def _traverse_collect(env, traverser, adv_nets, t, rng,
     pred_r = _predict(adv_nets[actor], tok_state)
     sigma  = regret_matching_np(pred_r, mask)
 
-    # Every visited state contributes to the policy buffer regardless of
-    # whether the actor is the traverser. This is the "collect average
-    # strategy from both seats" rule that makes the PolicyNet converge
-    # to the time-averaged σ̄.
-    pol_writes_out.append((tok_state, sigma))
+    # Strategy memory: σ is stored ONLY at opponent nodes (Brown 2019, Alg. 1).
+    # Opponent nodes are visited proportionally to that player's own reach
+    # (it samples its own actions), which is the weighting the average strategy
+    # σ̄ requires. Traverser nodes are branch-all (reach-unweighted) — storing
+    # σ there biases the PolicyNet's training distribution.
+    if actor != traverser:
+        pol_writes_out.append((tok_state, sigma))
 
     # Depth cap: substitute AdvNet-σ-weighted value estimate for further
     # recursion. `pred_r` is in scaled-regret units (REGRET_SCALE-divided

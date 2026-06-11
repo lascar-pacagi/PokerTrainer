@@ -214,10 +214,20 @@ def traverse_coro(env,
     pred_r = (yield (actor, tok_state))    # type: np.ndarray
     sigma = regret_matching_np(pred_r, mask)
 
-    # Every visited state contributes to the policy buffer.
-    pol_writes.append((tok_state, sigma))
+    # Strategy memory: σ is stored ONLY at opponent nodes (Brown 2019, Alg. 1).
+    # The opponent samples its own actions from σ, so its nodes are visited
+    # proportionally to its own reach probability — the weighting the average
+    # strategy needs. Traverser nodes are reached by branching every action
+    # (reach-unweighted); storing σ there biases the PolicyNet targets.
+    if actor != traverser:
+        pol_writes.append((tok_state, sigma))
 
     # Depth cap: substitute AdvNet-σ-weighted bootstrap for further recursion.
+    # KNOWN DEVIATION from Brown 2019 (paper traverses to terminal): σ-weighted
+    # predicted REGRETS are not a state value (regrets are relative to v(σ); a
+    # converged net gives ≈0 here), so this bootstrap ≈ "deep tails are 0 EV".
+    # Rarely hit at max_depth=34; never at short stacks. A proper fix would be
+    # a value head or removing the cap.
     if env.state().history_size >= max_depth:
         return float((sigma * pred_r * mask).sum()) * regret_scale
 
@@ -246,7 +256,11 @@ def traverse_coro(env,
     else:
         legal_probs = np.full(n_legal, 1.0 / n_legal, dtype=np.float32)
     chosen_local_idx = int(rng.choice(n_legal, p=legal_probs))
-    env.step(chosen_local_idx)
+    # Apply by ActionType, NOT by env.step(index): env.step() interprets the
+    # index against the ENGINE's unfiltered legal list, so with a curriculum
+    # filter the same index means a different action (e.g. filtered [F,C,AI]
+    # idx 2 → engine legal[2] = RAISE_25, a silent wrong move).
+    env.step_action(legal[chosen_local_idx])
     return (yield from traverse_coro(env, traverser, rng,
                                      adv_writes, pol_writes,
                                      max_depth=max_depth, allowed=allowed,
