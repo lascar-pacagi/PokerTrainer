@@ -30,11 +30,13 @@ DEFAULT_MAX_DEPTH = 34
 # depth-cap value bootstrap needs to multiply by REGRET_SCALE to reconvert
 # the scaled prediction to chip units before mixing with terminal payoffs.
 #
-# IMPORTANT: 100 is correct ONLY for the 100bb game. The right divisor is the
-# effective stack in bb (max payoff swing ≈ ±stack_bb), so cfr_coro derives
-# `regret_scale = cfg.stage.starting_stack_bb` and threads it into traverse_coro
-# — a short-stack stage at 10bb divides by 10, not 100. Using the hard-wired 100
-# at 10bb made every target ~10× too small; with weight_decay the AdvNet
-# underfit to ≈0 and froze at uniform σ. This constant is just the full-game
+# cfr_coro threads `regret_scale = cfg.stage.starting_stack_bb` so loss/grad
+# magnitudes stay interpretable across stack depths (a 10bb stage divides by 10,
+# not 100, otherwise the loss prints as 0.000 and tells you nothing). This is a
+# REPORTING/numerics convenience ONLY: regret matching and Adam are both
+# scale-invariant, so the divisor does not change what the net learns — a
+# controlled diagnostic (tests/diag_regret_scale_freeze.py) confirmed scale=10
+# and scale=100 give byte-identical results. The thing that DID matter was
+# weight_decay (see cfg.optim.weight_decay). This constant is the full-game
 # default for callers that don't pass a stage-specific scale.
 REGRET_SCALE = 100.0

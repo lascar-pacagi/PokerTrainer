@@ -517,6 +517,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-traversals-per-iter", type=int, default=5000)
     p.add_argument("--adv-grad-steps", type=int, default=4000)
     p.add_argument("--policy-grad-steps", type=int, default=50000)
+    p.add_argument("--weight-decay", type=float, default=0.0,
+                   help="Adam L2 on AdvNet/PolicyNet refits. NOTE: weight_decay "
+                        "shrinks all weights every step and overwhelms the weak "
+                        "hole-card-discrimination signal — a controlled "
+                        "diagnostic showed wd=1e-3 freezes the net to a constant "
+                        "action while wd=0 learns the correct hand-dependent "
+                        "range. Use 0 unless you have a specific reason.")
     p.add_argument("--adv-capacity", type=int, default=2_000_000)
     p.add_argument("--policy-capacity", type=int, default=4_000_000)
     # Transformer hyperparameters (see cfr/config.py:CFRModelConfig).
@@ -571,6 +578,7 @@ def main() -> None:
     cfg.train.n_traversals_per_iter = args.n_traversals_per_iter
     cfg.optim.n_grad_steps_per_refit = args.adv_grad_steps
     cfg.train.policy_n_grad_steps = args.policy_grad_steps
+    cfg.optim.weight_decay = args.weight_decay
     cfg.buffer.adv_capacity = args.adv_capacity
     cfg.buffer.policy_capacity = args.policy_capacity
     cfg.model.d_model  = args.d_model
@@ -632,13 +640,14 @@ def main() -> None:
     allowed = (frozenset(cfg.stage.allowed_actions)
                if cfg.stage.allowed_actions is not None else None)
 
-    # Regret-target scale must track the effective stack: max payoff swing is
-    # ±stack_bb, so dividing by stack_bb normalizes targets to O(1). The old
-    # hard-wired REGRET_SCALE=100 was calibrated for the 100bb game and made
-    # short-stack regrets ~10× too small to learn (BB froze at uniform). For
-    # the full game stack_bb=100, so this reproduces the prior behaviour.
+    # Regret-target scale = effective stack in bb, so loss/grad magnitudes stay
+    # interpretable across stack depths (at 10bb the old /100 made the loss print
+    # as 0.000). This is a numerics convenience only — Adam + regret matching are
+    # scale-invariant, so it does NOT change learning (the BB freeze was
+    # weight_decay, not scale; see --weight-decay and diag_regret_scale_freeze).
     regret_scale = float(cfg.stage.starting_stack_bb)
-    print(f"[cfr_coro] regret_scale={regret_scale:g} (=effective stack in bb)")
+    print(f"[cfr_coro] regret_scale={regret_scale:g} (=effective stack in bb); "
+          f"weight_decay={cfg.optim.weight_decay:g}")
 
     # Stage-1 push/fold: solve the Nash oracle once (cached) so the per-iter
     # validation has a ground-truth target to score the net's ranges against.

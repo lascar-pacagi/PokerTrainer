@@ -42,7 +42,15 @@ class CFRModelConfig:
 @dataclass
 class CFROptimConfig:
     lr: float = 1e-3                # Adam tends to converge faster than RMSProp on regret-MSE
-    weight_decay: float = 1e-3      # mild L2 helps with refit-from-scratch stability
+    weight_decay: float = 1e-3      # WARNING: a controlled diagnostic
+                                    # (tests/diag_regret_scale_freeze.py) showed
+                                    # 1e-3 freezes the AdvNet to a constant action
+                                    # (no hole-card discrimination) while 0 learns
+                                    # the correct hand-dependent range. Weight
+                                    # decay's fixed per-step shrink overwhelms the
+                                    # weak card-discrimination signal. Override via
+                                    # cfr_coro --weight-decay 0; likely implicated
+                                    # in the original 100bb hole-card insensitivity.
     grad_clip: float = 10.0
     # When refitting AdvNet at each iteration, do `n_grad_steps_per_refit` grad
     # steps with `batch_size` samples per step.

@@ -39,6 +39,9 @@ ITERS="${ITERS:-1000}"
 K="${K:-1000}"
 ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-5000}"
 POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-50000}"
+# weight_decay default 0: a controlled diagnostic showed 1e-3 freezes the AdvNet
+# to a constant action (kills hole-card discrimination). See cfr_coro.py.
+WEIGHT_DECAY="${WEIGHT_DECAY:-0}"
 D_MODEL="${D_MODEL:-128}"
 LAYERS="${LAYERS:-4}"
 N_HEADS="${N_HEADS:-4}"
@@ -93,6 +96,7 @@ singularity exec --nv \
         --n-traversals-per-iter "$K" \
         --adv-grad-steps      "$ADV_GRAD_STEPS" \
         --policy-grad-steps   "$POLICY_GRAD_STEPS" \
+        --weight-decay        "$WEIGHT_DECAY" \
         --d-model             "$D_MODEL" \
         --n-layers            "$LAYERS" \
         --n-heads             "$N_HEADS" \
