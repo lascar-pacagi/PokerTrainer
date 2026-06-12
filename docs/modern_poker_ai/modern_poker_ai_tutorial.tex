@@ -210,14 +210,61 @@ The famous headline: the blueprint trained in \textbf{8 days on a 64-core
 server}, under 512\,GB RAM, \textbf{no GPU} --- roughly \$150 of cloud compute,
 versus millions of dollars of TPU time for Go-class systems.
 
-\subsection{Stage 2 (online): depth-limited re-solving with continuation
-strategies}
+\subsection{Stage 2 (online): re-solving --- but what exactly do you re-solve?}
 
 The blueprint alone is too coarse to beat pros (the abstraction blurs exact
-bet sizes and hand distinctions). At the table, Pluribus re-solves the
-\emph{current subgame} finely. The problem: a subgame in no-limit poker can
-still reach the end of the hand --- far too deep to solve in seconds. The fix
-is the paper's key invention:
+bet sizes and hand distinctions), so at the table Pluribus computes a fresh,
+finer strategy for the situation it is actually in. In chess that sentence is
+easy to make precise: \emph{search from the current position}. In poker the
+analogous sentence does not even type-check, and seeing why is most of
+understanding online re-solving.
+
+\textbf{Problem 1: the ``position'' is not a state.} What the table shows
+(board, pot, betting history) is only the \emph{public state}; its value
+depends on which hands the players might be holding. So the root of a poker
+subgame must carry, for every player, a \emph{range}: a probability
+distribution over all 1326 hole-card pairs. And ranges do not fall from the
+sky --- they come from strategies. \emph{If} you assume each player has been
+following a known strategy so far (the blueprint, plus the outputs of any
+earlier re-solves), then every public action they took is evidence about
+their hand, and Bayes' rule turns the betting history into a range:
+hands that would have folded to the flop raise get probability ${\sim}0$,
+hands that would have 3-bet get boosted, and so on. Pluribus knows its
+\emph{own} strategy exactly, so its own range is exact; for opponents it
+assumes they played approximately the blueprint.
+
+\textbf{Problem 2: the subgame still reaches too deep.} Even rooted on the
+flop, a no-limit subgame spans turn and river --- far too large to solve in
+seconds. Truncating it at a depth limit needs care, and that is the paper's
+key invention.
+
+So one online solve looks like this end to end:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
+  pstep/.style={rectangle, rounded corners=1.5mm, draw=accent, fill=blue!5, thick,
+               align=center, minimum height=15mm, minimum width=33mm, font=\scriptsize}]
+  \node[pstep] (s1) at (0,0)
+    {\textbf{1. Bayes the history}\\ betting line $\to$ a range\\ for every player\\ (assuming blueprint play)};
+  \node[pstep] (s2) at (4.35,0)
+    {\textbf{2. build the subgame}\\ public state + ranges,\\ exact bet sizes faced,\\ depth-limited};
+  \node[pstep] (s3) at (8.7,0)
+    {\textbf{3. solve it}\\ Linear CFR over the\\ \emph{whole} range (all 1326\\ hands at once)};
+  \node[pstep] (s4) at (13.05,0)
+    {\textbf{4. only now look}\\ \textbf{at your cards}\\ play the action of the\\ row for your real hand};
+  \draw[->, very thick] (s1) -- (s2);
+  \draw[->, very thick] (s2) -- (s3);
+  \draw[->, very thick] (s3) -- (s4);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Trick 1: depth limits with continuation strategies}
+
+Cutting the subgame off at a depth limit means writing a \emph{number} at
+each cut point: ``the value of arriving here''. Any \emph{single} assumption
+about how play continues below the cut (e.g.\ ``everyone plays the blueprint
+afterwards'') is an assumption the search above will learn to exploit. The
+fix:
 
 \begin{center}
 \begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
@@ -267,24 +314,105 @@ no longer assume a docile opponent --- at a tiny fraction of the cost of
 solving to the end of the hand.
 \end{intuition}
 
-\begin{lstlisting}[style=py, caption={Pluribus, schematically. The blueprint is Deep CFR's ancestor (same traversals, tables instead of nets); play time adds depth-limited re-solving.}]
+The three biased continuations are cheap to build --- take the blueprint,
+multiply the probability of the biased action (fold / call / raise) by a
+constant, renormalize --- and the value of a leaf under any combination of
+choices is estimated by rolling the hand out under those strategies. The
+choices themselves are folded into the CFR solve: each player's leaf-choice
+is just one more decision in the subgame, so the equilibrium the solver finds
+is already robust against all $4^{\text{players}}$ ways play could continue.
+
+\subsection{Trick 2: solve for your whole range, not for your hand}
+
+A chess engine searches for the best move \emph{in the position it sees}.
+The poker analogue --- ``find the best line for the two kings I am
+holding'' --- would be a disaster, and understanding why is the other half of
+online re-solving. Your opponents never observe your hand; they observe your
+\emph{actions}. If the strategy you compute is a function of your actual
+hand, your actions become a code for it, and an attentive opponent reads the
+code: you bet only your strong hands, they fold exactly then, your strong
+hands stop earning. The whole point of a balanced (GTO) strategy is that the
+\emph{same} observable action is taken by strong and weak hands in calibrated
+proportions.
+
+So step 3 of the pipeline solves the subgame \textbf{for every hand Pluribus
+could be holding at once}: the output $\sigma$ is a whole table --- one row
+per hole-card pair in its range, one action distribution per row --- computed
+jointly so that the \emph{range as a whole} is unexploitable. Only after the
+solve does Pluribus look at its actual cards and read off that single row
+(step 4). Bluffs are not a separate mechanism: the equilibrium simply
+assigns some raising probability to weak rows so that strong rows get paid
+--- balance is an \emph{output} of range-level solving, not a style knob.
+
+\begin{intuition}
+This also explains an implementation detail: ``vector-based'' Linear CFR.
+Since the subgame must be solved for all 1326 hands anyway, the efficient
+form sweeps the public tree once per iteration carrying a 1326-long
+\emph{vector} of regrets/values per node, instead of traversing once per
+hand. Small subgames use this exact vector form; very large ones fall back
+to sampling (Monte Carlo Linear CFR).
+\end{intuition}
+
+\subsection{The full play-time loop}
+
+Putting both tricks into the pipeline, here is what happens at a Pluribus
+decision on, say, the flop:
+
+\begin{enumerate}[leftmargin=1.6em, itemsep=1pt]
+\item \textbf{Freeze the public state}: board, pot, the exact bet it faces
+  (no rounding --- the subgame is built with the true size).
+\item \textbf{Compute ranges} for all players by Bayes from the betting
+  history, assuming blueprint play (its own range: exact).
+\item \textbf{Build the depth-limited subgame} from this root --- typically
+  the rest of the current street plus the start of the next --- and attach
+  the four continuation choices at every leaf (Trick 1).
+\item \textbf{Solve with Linear CFR for the whole range} (Trick 2), a few
+  seconds on two CPUs.
+\item \textbf{Play}: sample an action from the solved row of its actual
+  hand.
+\item \textbf{If an opponent later uses a bet size outside the current
+  tree}: build a \emph{new} subgame that contains that exact size and
+  re-solve --- \emph{nested} re-solving, repeated as often as needed. (This
+  is how off-tree actions are handled exactly instead of being rounded to
+  the abstraction, the classic leak of blueprint-only bots.)
+\end{enumerate}
+
+\begin{lstlisting}[style=py, caption={Pluribus, schematically. The blueprint is Deep CFR's ancestor (same traversals, tables instead of nets); play time adds range-aware, depth-limited re-solving.}]
 def blueprint(T):                      # OFFLINE, once, ~8 days on CPUs
     for t in range(1, T + 1):
         for p in range(6):             # six players!
             mccfr_traverse(deal(), p, t)   # external sampling, linear weights
     return regret_tables               # indexed by ABSTRACT infosets
 
-def act(public_state, blueprint):      # ONLINE, every decision
-    if early_and_on_tree(public_state):
-        return sample(blueprint[abstract(public_state)])
-    G = subgame(public_state, depth_limit=few_actions)
-    for leaf in G.leaves():
-        # each player picks 1 of 4 continuations at the leaf -> the leaf
-        # itself becomes a small game (no fixed-policy cheating)
+def resolve(public_state, ranges):     # ONLINE: one subgame solve
+    G = subgame(public_state, ranges,            # root carries the RANGES
+                depth_limit=rest_of_street_plus,
+                bet_sizes=exact_bets_faced)      # no rounding
+    for leaf in G.leaves():            # Trick 1: 4-way continuation choice
         leaf.attach_choices([blueprint, fold_bias, call_bias, raise_bias])
-    sigma = linear_cfr(G)              # re-solve the enriched subgame
-    return sample(sigma[my_infoset])
+    return linear_cfr(G)               # Trick 2: sigma[hand] for ALL hands
+
+def act(history, board, my_hand):
+    if preflop and on_tree(history):   # preflop abstraction is dense:
+        return sample(blueprint[abstract(history, my_hand)])
+    ranges = bayes_ranges(history, board, assumed=blueprint)
+    sigma  = resolve(public_state(history, board), ranges)
+    return sample(sigma[my_hand])      # look at MY cards only at the end
+# off-tree opponent bet later? build a new subgame with that exact size
+# and call resolve() again (nested re-solving).
 \end{lstlisting}
+
+\begin{trap}
+\textbf{Where the soundness leak is.} Step 2 \emph{assumes} opponents played
+the blueprint so far. In two-player zero-sum, this ``unsafe'' re-solving can
+in principle be punished by an opponent who deviates earlier on purpose to
+poison your beliefs; Libratus closed exactly this hole with \emph{safe}
+re-solving gadgets that guarantee the re-solved strategy never does worse
+than the blueprint against any hand. Pluribus --- playing six-max, where
+equilibrium guarantees were abandoned anyway (Sec.\ 2.1) --- accepts the
+heuristic. One more instance of the multiplayer trade: theory exchanged for
+scale, validated empirically.
+\end{trap}
 
 \textbf{Results.} Against elite professionals (including World Series
 champions), in both 5 humans $+$ 1 AI and 1 human $+$ 5 copies formats,
