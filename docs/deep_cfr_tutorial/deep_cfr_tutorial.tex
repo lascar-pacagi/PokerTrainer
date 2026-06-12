@@ -174,11 +174,34 @@ Everything in CFR is built on one simple, almost embarrassing idea:
 \emph{keep track of how much you regret not having played each action, and
 play actions you regret in proportion to that regret.}
 
-Suppose at some decision point you have played many times, and looking back:
-playing \texttt{fold} would have earned you $-2$ chips relative to what you
-actually did on average, \texttt{call} $+3$, and \texttt{raise} $+1$.
-Your (cumulative) regrets are $R = [-2, +3, +1]$. \textbf{Regret matching}
-(Hart \& Mas-Colell, 2000) converts these into a strategy:
+Let us make ``regret'' a number you could actually count. Fix \emph{one}
+decision point, and suppose you have faced it 10 times so far, sometimes
+folding, sometimes calling, sometimes raising. Adding up those 10 outcomes,
+you won \textbf{5 chips in total}. Now replay history three times, each time
+asking one question: \emph{what if I had played the same single action at
+every one of those 10 visits, with everything else unchanged?}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+hindsight experiment & total chips & vs.\ the 5 you actually won & regret \\
+\midrule
+``I always fold''  & 3 & $3-5$ & $-2$ \\
+``I always call''  & 8 & $8-5$ & $+3$ \\
+``I always raise'' & 6 & $6-5$ & $+1$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The \textbf{regret of an action} is exactly that last column: what the action
+\emph{would} have earned you, minus what you \emph{actually} earned. Positive
+regret ($+3$ for \texttt{call}) means ``I wish I had played this more'';
+negative regret ($-2$ for \texttt{fold}) means ``glad I didn't''. Collecting
+the column into a vector, your cumulative regrets at this decision point are
+$R = [-2, +3, +1]$. \textbf{Regret matching} (Hart \& Mas-Colell, 2000)
+converts these into a strategy --- play each action in proportion to how much
+you regret not playing it:
 
 \begin{equation*}
 \sigma(a) \;=\; \frac{\max(R(a),\,0)}{\sum_{b}\max(R(b),\,0)}
