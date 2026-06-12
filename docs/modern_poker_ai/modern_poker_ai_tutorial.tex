@@ -129,6 +129,41 @@ AlphaHoldem is also a diagonal of \emph{decreasing game theory and increasing
 deep learning}.
 \end{intuition}
 
+\subsection{Refresher: the CFR core that three of the four systems share}
+
+Pluribus fills its blueprint with it, ReBeL runs it inside every subgame,
+Player of Games runs its regret-update phase with it --- only AlphaHoldem
+drops it. So here is tabular CFR once, compactly, with its two classic
+upgrades shown inline (the full pedagogical build-up lives in the companion
+volume, Sections 2--3):
+
+\begin{lstlisting}[style=py, caption={CFR in one block. \texttt{reach[p]} is the probability that player $p$'s own choices lead here; regrets are weighted by the \emph{opponent's} reach, the average strategy by \emph{your own}. The commented lines show the vanilla / CFR$^{+}$ variants of the update; the active lines are Linear CFR (weight everything by $t$), which is what Pluribus and Deep CFR use.}]
+R, S = tables_of_zeros(), tables_of_zeros()  # regrets / average strategy
+
+def cfr(state, t, reach):
+    if state.is_terminal():
+        return state.payoffs()                    # (u_0, u_1), zero-sum
+    I, p  = infoset(state), state.to_act()
+    sigma = regret_matching(R[I])                 # positive part, normalized
+    v, v_I = {}, [0.0, 0.0]
+    for a in state.legal():
+        r = list(reach)
+        r[p] *= sigma[a]                          # my move scales MY reach
+        v[a] = cfr(state.child(a), t, r)
+        v_I  = [x + sigma[a] * y for x, y in zip(v_I, v[a])]
+    for a in state.legal():
+        # vanilla CFR:  R[I][a] +=     reach[1-p] * (v[a][p] - v_I[p])
+        # CFR+:         R[I][a]  = max(R[I][a] + reach[1-p] * (..), 0)
+        R[I][a] += t * reach[1 - p] * (v[a][p] - v_I[p])   # Linear CFR
+    S[I] += t * reach[p] * sigma          # the average strategy = the output
+    return v_I
+
+def solve(T):
+    for t in range(1, T + 1):
+        cfr(deal_random_hand(), t, reach=[1.0, 1.0])   # chance sampled
+    return normalize(S)                   # converges to Nash (2 players)
+\end{lstlisting}
+
 % ════════════════════════════════════════════════════════════════════════════
 \section{Pluribus: superhuman six-player poker, no neural network}
 % ════════════════════════════════════════════════════════════════════════════
@@ -167,8 +202,8 @@ with search:
 \item \textbf{Action abstraction:} only a handful of bet sizes exist in the
   abstract game.
 \item \textbf{Linear MCCFR} (the same external-sampling traversals as our
-  trainer, plus the same linear $t$-weighting) fills the regret tables.
-  Pseudo-code for CFR, CFR$^{+}$ and Linear CFR: companion volume, Section~3.
+  trainer, plus the same linear $t$-weighting) fills the regret tables ---
+  this is exactly the Linear-CFR update of Listing~1, run with sampling.
 \end{itemize}
 
 The famous headline: the blueprint trained in \textbf{8 days on a 64-core
