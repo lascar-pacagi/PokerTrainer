@@ -612,10 +612,82 @@ imperfect information --- which is why the paper's title says ``RL $+$
 Search''.
 \end{intuition}
 
+\subsection{What the value net actually sees and says}
+
+It is worth being concrete, because the input/output shape \emph{is} the
+method. The input is the whole PBS: the public features (board cards, pot,
+bets) \emph{plus both belief vectors} --- ${\sim}1326$ probabilities per
+player. The output is \textbf{not one number}: it is \textbf{a value per
+hand, for each player} (the \emph{infostate values}). It has to be: the
+tabular CFR running above the leaves updates a regret \emph{per hand} ---
+``what is arriving at this leaf worth \emph{if I hold AA}? \emph{if I hold
+76s}?'' --- so a single scalar would be useless to it. Equivalently: the net
+is a learned generalization of exactly the per-hand counterfactual values
+that DeepStack pioneered, with the beliefs as part of the input so one net
+covers every range shape.
+
+The subgame ReBeL solves spans roughly the rest of the current betting
+round; wherever new public cards would be revealed, the tree stops and the
+net answers. Solving the subgame with $T_{\mathrm{cfr}}$ tabular CFR
+iterations queries the net thousands of times --- this is why the net must be
+fast, and why its accuracy directly caps the quality of play (the
+$\varepsilon_{\mathrm{approx}}$ floor of volume~3).
+
+\subsection{Close-up: the two questions everyone asks}
+
+\textbf{Q1 --- beliefs are computed from the players' strategies. How can
+ReBeL know the \emph{opponent's} beliefs?} It cannot, and it does not
+pretend to: like Pluribus's ranges, the PBS is a statement about a
+\emph{model}. ReBeL computes \emph{all} beliefs --- its own and its
+opponent's --- from the assumption that both players follow the policies its
+own procedure generates (this is the ``common knowledge'' assumption in the
+paper). Against an opponent who actually plays differently, the on-model
+logic of Pluribus's Q2 applies verbatim: deviations are, within the model,
+unprofitable; early deviations can poison the beliefs; and the next question
+is precisely ReBeL's elegant answer to that poisoning attack.
+
+\textbf{Q2 --- after solving the subgame, why play the strategy of a
+\emph{randomly sampled} CFR iteration rather than the final average?} This
+is the strangest-looking line of the pseudo-code and the paper's quiet
+masterstroke; it solves two problems at once.
+
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+\item \emph{Training consistency.} The value targets stored for the net are
+  values of the subgame's \emph{average} policy --- an average over all
+  $T_{\mathrm{cfr}}$ iterations. If play (and hence the belief updates that
+  produce the \emph{next} PBS) always followed one fixed choice, the
+  distribution of next-PBSs would not match the distribution the stored
+  values implicitly assume, and the net would be trained on one
+  distribution and queried on another --- compounding off-distribution error
+  down the game. Sampling the iteration uniformly makes ``how beliefs are
+  generated'' agree, in expectation, with ``how values were averaged''.
+\item \emph{Safety.} Recall the hole in naive re-solving (Pluribus close-up,
+  Q2): an opponent who knows how you re-solve can poison your beliefs.
+  ReBeL's theorem says that playing a uniformly sampled CFR iterate makes
+  the depth-limited search \emph{provably} low-exploitability --- the same
+  guarantee Libratus needed hand-built gadget games for, obtained instead by
+  randomization. Intuition: the opponent cannot tailor an exploit to ``the''
+  strategy at the subgame root, because there is no single such strategy ---
+  they face the whole cloud of CFR iterates, and beating the cloud on
+  average is exactly what CFR's equilibrium guarantee forbids.
+\end{itemize}
+
+\begin{intuition}
+A useful contrast triangle. \textbf{Libratus}: safety by \emph{construction}
+(gadget subgames). \textbf{Pluribus}: safety \emph{dropped} (six-max,
+empirical validation). \textbf{ReBeL}: safety by \emph{randomization}
+(sample an iterate). All three are answers to the same question --- ``what
+stops an opponent from gaming my re-solver?'' --- and the three answers
+neatly span engineering, pragmatism, and theory.
+\end{intuition}
+
 \textbf{Results.} Superhuman heads-up no-limit hold'em with far less poker
 knowledge than DeepStack/Libratus: it beat top HUNL professional Dong Kim by
 \textbf{165\,mbb/hand over 7\,500 hands} (Kim was the best-performing human of
-the Libratus match). Also solid play in Liar's Dice, showing generality.
+the Libratus match). Also solid play in Liar's Dice, showing generality. The
+experiments used a fixed menu of bet sizes for tractability; handling
+off-tree sizes by nested re-solving (as in Libratus/Pluribus) is compatible
+but orthogonal.
 
 \begin{trap}
 \textbf{The PBS is the whole trick --- and the whole bill.} The belief vector
@@ -728,6 +800,67 @@ the principle ``validate the function where you actually rely on it'' is the
 same; PoG just turns it into the training signal itself.
 \end{intuition}
 
+\subsection{What a node of the search tree actually is}
+
+Same exercise as for ReBeL, because here too the data shapes \emph{are} the
+method. A node of PoG's tree is a \emph{public} state \textbf{plus the
+players' belief vectors} --- a PBS in ReBeL's vocabulary. The CVPN takes
+that in and emits two things \emph{per hand}: a counterfactual value (used
+when the node is a search leaf) and a policy prior (used to decide where to
+grow the tree, exactly like AlphaZero's policy head guides PUCT). Now run
+the degeneration test: in chess, the ``belief vectors'' are trivial (one
+world state, probability $1$), the public tree \emph{is} the game tree, the
+counterfactual values collapse to ordinary state values --- and PoG's
+machinery reduces to AlphaZero's value-plus-policy search. The
+imperfect-information generality costs nothing when there is nothing to be
+uncertain about. That is the precise sense in which it is ``one algorithm
+for both kinds of games''.
+
+The training loop runs two processes. \emph{Actors} play games with a modest
+search budget, logging every leaf position where the CVPN was queried into
+the \textbf{query buffer}. A \emph{trainer} pops queried positions and
+re-solves them with a \emph{larger} budget, producing better values than the
+net originally returned --- those become its regression targets (and the
+deeper solves may query new leaves, which re-enter the buffer with decaying
+probability: a self-improvement ladder in which the network forever chases
+its own deeper searches).
+
+\subsection{Close-up: the two questions everyone asks}
+
+\textbf{Q1 --- ReBeL also searches over belief states. What is actually
+different?} The \emph{shape of the searched region}. At every decision,
+ReBeL builds the \textbf{full, dense} subgame down to its depth limit and
+solves all of it with tabular CFR --- affordable in poker, where a betting
+round has a handful of public actions, but hopeless in games with large
+public branching or long horizons between chance events. PoG instead
+\textbf{grows a sparse tree} one node at a time, AlphaZero-style: the policy
+prior and visit counts decide which few branches deserve nodes at all,
+and the CFR phase keeps whatever tree currently exists balanced. Sparse
+growth is what lets the same code play chess (huge branching, no beliefs)
+and Scotland Yard (long imperfect-information horizons) --- and it is why
+PoG, not ReBeL, is the one that generalized beyond poker.
+
+\textbf{Q2 --- why does plain AlphaZero/MCTS fail at poker in the first
+place?} Because MCTS is an \emph{argmax engine}: as visits accumulate, it
+concentrates on the single best-looking action, and its play at a state
+becomes essentially deterministic. In perfect information that is exactly
+right --- some move \emph{is} best. In poker, determinism is a tell. A
+deterministic policy at a bluffing spot either always bluffs or never
+bluffs, and either way an observant opponent prints money (fold always /
+call always). Equilibria in imperfect information are \emph{mixed} ---
+calibrated frequencies, not best moves --- and producing mixtures is
+precisely what regret matching does and tree-search argmax does not. GT-CFR
+is therefore not a hybrid for hybrid's sake: the expansion phase brings
+MCTS's scalability, the regret phase brings CFR's balance, and each
+compensates the other's failure mode.
+
+\begin{intuition}
+One sentence to keep: \emph{AlphaZero asks ``what is the best move here?'';
+CFR asks ``what frequencies keep me unexploitable here?''} --- and Player of
+Games is the observation that you can ask the first question about
+\emph{where to look} while asking the second about \emph{what to play}.
+\end{intuition}
+
 \textbf{Results.} One set of weights per game, same algorithm: expert-level
 chess and Go (below a specialized AlphaZero at equal compute --- the price of
 generality), beats Slumbot (the strongest open heads-up poker bot) and is not
@@ -790,6 +923,19 @@ regret anything. The action history tensor plays the role our token sequence
 plays in this project --- it is the only channel through which the network can
 infer what the opponent's range looks like.
 
+Why these particular encodings? The card stream stacks $4{\times}13$ binary
+planes (suit $\times$ rank), one group per street: hole cards, flop, turn,
+river. On that grid, poker structure is \emph{geometric}: a straight draw is
+a run of adjacent \emph{columns}, a flush draw is mass concentrated in one
+\emph{row}, a paired board is two cells sharing a column --- exactly the
+local patterns small convolutions detect cheaply. The action stream encodes,
+per betting round and per player, which action was taken and the normalized
+bet size, again as planes, so the same convolutional machinery picks up
+betting \emph{patterns} (e.g.\ ``raise--raise'' textures) rather than
+treating the history as an opaque flat vector --- the same lesson, in
+convolutional form, that pushed this project from a flat 816-dim input to a
+token sequence.
+
 \subsection{Making PPO survive poker}
 
 Vanilla PPO collapses on poker: rewards span $\pm$200 big blinds with brutal
@@ -829,6 +975,46 @@ while training:
         update(learner, trinal_clip_ppo(rollouts))
     pool = top_k(pool + [learner], K, by=elo)   # survival of the fittest
 \end{lstlisting}
+
+\subsection{Close-up: the two questions everyone asks}
+
+\textbf{Q1 --- no search, no ranges: where does balance (bluffing) come
+from, if anywhere?} Only from gradient pressure. If the current policy is
+predictable --- bets only its strong hands --- then \emph{provided some
+opponent in the K-best pool punishes that pattern}, those rollouts lose
+money and the policy gradient pushes toward mixing. Balance can emerge, but
+it is an \emph{equilibrium of the pool}, not of the game: nothing certifies
+that the pool contains the punisher for every leak. Contrast the other
+systems in this volume: Pluribus \emph{computes} balance per spot (Trick~2,
+the whole-range solve); AlphaHoldem \emph{hopes SGD finds it}. This is the
+precise content of the ``no certificate'' trade --- and why follow-up work
+exploiting pure-RL poker agents keeps finding leaks that self-play ratings
+never showed.
+
+\textbf{Q2 --- why does naive self-play cycle, and why does a K-best pool
+help?} Volume 3 proved the deep reason: in zero-sum games, the
+\emph{current} strategies of self-play never converge --- they orbit the
+equilibrium forever (the RPS table showed a 73\%-Paper current strategy
+mid-convergence); only the \emph{average} converges. CFR is built around
+that fact: it carries the average explicitly. A vanilla RL agent keeps only
+a current policy, so it \emph{lives} the orbit instead of averaging it:
+B learns to beat A, C learns to beat B, and C loses to A --- rock--paper--%
+scissors in strategy space, with ratings that go up forever while true
+strength goes nowhere. Training against the $K$ best \emph{historical}
+agents at once is a crude integral over the orbit: to enter the pool you
+must do well against a \emph{spread} of past play styles simultaneously,
+which damps the cycle --- a poor man's strategy averaging. (AlphaStar's
+league is the same medicine at industrial scale.) Seen this way, K-best
+self-play is not an RL hack; it is CFR's averaging theorem, smuggled back in
+through the opponent distribution.
+
+\begin{intuition}
+The two clips of Trinal-Clip PPO have the same shape as this project's
+regret-scale reasoning: bound every learning target by what is
+\emph{physically reachable in the hand} ($\pm$ the committed chips). Heavy
+tails in poker are not noise to average away --- they are impossible targets
+to refuse.
+\end{intuition}
 
 \textbf{Results.} Over 100\,000 evaluation hands, AlphaHoldem beats Slumbot
 and a DeepStack re-implementation, after \textbf{3 days of training on one
