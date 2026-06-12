@@ -583,23 +583,99 @@ be trained the way AlphaZero trains its value net.
 \end{tikzpicture}
 \end{center}
 
-\subsection{The self-play loop}
+\subsection{The self-play loop, one hand at a time}
 
-\begin{lstlisting}[style=py, caption={ReBeL's training loop (simplified). The same machinery runs at test time, minus the buffer writes.}]
+The loop is easiest to follow as a single hand of self-play, narrated.
+First, the cast: ReBeL plays \emph{both} seats. At the start of an episode a
+real deal hands private cards to each seat (the \emph{world state}); on top
+of that, the algorithm maintains one shared bookkeeping object, the PBS ---
+which contains no secrets (board, pot, two belief vectors), so it looks
+identical from both seats. The hand then alternates between \emph{solving}
+(a fresh subgame at the current PBS) and \emph{stepping} (an action is
+played, beliefs update, possibly new board cards arrive):
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
+  pbs/.style={ellipse, draw=heroG, fill=heroG!8, thick, align=center,
+              inner sep=2pt, font=\scriptsize},
+  buf/.style={rectangle, rounded corners=1.5mm, draw=memO, fill=orange!8, thick,
+              align=center, font=\scriptsize, minimum height=8mm},
+  net/.style={rectangle, rounded corners=1.5mm, draw=accent, fill=blue!6, thick,
+              align=center, font=\scriptsize, minimum height=8mm}]
+  \node[pbs] (b0) at (0,0)    {$\beta_0$\\ preflop};
+  \node[pbs] (b1) at (3.6,0)  {$\beta_1$};
+  \node[pbs] (b2) at (7.2,0)  {$\beta_2$};
+  \node[font=\small] (dots) at (9.6,0) {$\cdots$};
+  \node[pbs] (bT) at (11.6,0) {terminal\\ (payoffs)};
+  \draw[->, thick] (b0) -- node[above, font=\tiny, align=center]
+      {solve $G_0$,\\ act, Bayes} (b1);
+  \draw[->, thick] (b1) -- node[above, font=\tiny, align=center]
+      {solve $G_1$,\\ act, Bayes} (b2);
+  \draw[->, thick] (b2) -- (dots);
+  \draw[->, thick] (dots) -- (bT);
+
+  \node[buf, minimum width=86mm] (buffer) at (4.4,-2.0)
+      {value buffer: one training pair $(\beta_t,\; v_t)$ per solve};
+  \draw[->, dashed, memO] (b0.south) -- (buffer.north -| b0.south);
+  \draw[->, dashed, memO] (b1.south) -- (buffer.north -| b1.south);
+  \draw[->, dashed, memO] (b2.south) -- (buffer.north -| b2.south);
+  \node[net] (vnet) at (11.4,-2.0) {refit $V(\cdot\,;\theta_v)$\\ after many hands};
+  \draw[->, thick, memO] (buffer) -- (vnet);
+\end{tikzpicture}
+\end{center}
+
+At each decision point, six things happen, in order:
+
+\begin{enumerate}[leftmargin=1.6em, itemsep=1pt]
+\item \textbf{Freeze the current PBS} $\beta_t$: board, pot, and both belief
+  vectors as they stand.
+\item \textbf{Build the depth-limited subgame} $G_t$ rooted at $\beta_t$ ---
+  roughly the rest of the current betting round; wherever new cards would be
+  dealt, the tree stops and the value net $V(\cdot\,;\theta_v)$ will answer.
+\item \textbf{Solve it}: $T_{\mathrm{cfr}}$ iterations of plain
+  \emph{tabular} CFR inside $G_t$ (this is where volume 1's algorithm
+  literally runs, thousands of times per hand). The policy net
+  $\theta_\pi$ warm-starts the iterations so fewer are needed; every leaf
+  evaluation is a query to the value net.
+\item \textbf{Store a training pair}: $(\beta_t,\, v_t)$, where $v_t$ is the
+  per-hand value vector of the root under the \emph{average} of the
+  $T_{\mathrm{cfr}}$ policies --- i.e.\ ``what this PBS is worth under
+  near-equilibrium play''. This is the label $\theta_v$ will later regress
+  on, exactly like AlphaZero labels positions with search outcomes.
+\item \textbf{Choose what to actually play}: pick \emph{one random
+  iteration} $t' \sim \mathrm{uniform}(1..T_{\mathrm{cfr}})$ and use its
+  policy $\sigma_{t'}$ --- \emph{not} the average. This is the
+  strangest-looking choice in the method; both reasons (training-distribution
+  consistency and safety-by-randomization) are unpacked in the close-up,
+  Q2 below.
+\item \textbf{Act and update}: the seat to act looks at its real cards and
+  samples its row of $\sigma_{t'}$; the action is public; Bayes' rule pushes
+  \emph{both} belief vectors through $\sigma_{t'}$, giving $\beta_{t+1}$
+  (if a street ends, the dealt board cards update the PBS too).
+\end{enumerate}
+
+When the hand reaches a terminal PBS, the episode's pairs join the buffer;
+after many hands, $\theta_v$ is refit on the buffer and $\theta_\pi$ on the
+stored search policies. \textbf{At test time against a human, the identical
+loop runs minus the stores} --- search-with-net-leaves \emph{is} the player;
+training merely makes the net worth searching with.
+
+\begin{lstlisting}[style=py, caption={ReBeL's training loop --- the six steps above, in code. The same machinery runs at test time, minus the buffer writes.}]
 def rebel_episode(theta_v, theta_pi, buffer):
-    beta = initial_pbs()                     # blinds posted, uniform beliefs
+    deal = sample_world()                    # real cards for both seats
+    beta = initial_pbs()                     # (1) blinds, uniform beliefs
     while not beta.is_terminal():
-        G = depth_limited_subgame(beta)      # leaves valued by V(.; theta_v)
-        policies = run_cfr(G, T_cfr,         # CFR-D: tabular CFR inside G,
-                           warm_start=theta_pi)  # net leaf values
-        # KEY SUBTLETY: play the policy of a RANDOM CFR iteration, not the
-        # final average. This makes the value targets consistent with the
-        # distribution of beliefs the next subgame will actually see.
-        sigma = policies[randint(1, T_cfr)]
-        buffer.add(beta, value_of_root(G, average(policies)))   # V target
-        a = sample(sigma[my_private_infoset])
-        beta = bayes_update(beta, sigma, a)  # PUBLIC update of both beliefs
-    refit(theta_v, buffer)                   # like AlphaZero's value training
+        G = depth_limited_subgame(beta)      # (2) leaves -> V(.; theta_v)
+        policies = run_cfr(G, T_cfr,         # (3) tabular CFR inside G,
+                           warm_start=theta_pi)
+        buffer.add(beta,                     # (4) value target: root values
+                   value_of_root(G, average(policies)))  # of the AVERAGE
+        sigma = policies[randint(1, T_cfr)]  # (5) play a RANDOM iterate
+                                             #     (why: close-up, Q2)
+        hand = deal[beta.to_act()]
+        a = sample(sigma[hand])              # (6) act with the real cards...
+        beta = bayes_update(beta, sigma, a)  #     ...Bayes BOTH beliefs
+    refit(theta_v, buffer)                   # after many hands
 \end{lstlisting}
 
 \begin{intuition}
