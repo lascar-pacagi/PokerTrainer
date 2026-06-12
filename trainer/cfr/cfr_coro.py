@@ -228,9 +228,8 @@ def traverse_coro(env,
     # converged net gives ≈0 here), so this bootstrap ≈ "deep tails are 0 EV".
     # Rarely hit at max_depth=34; never at short stacks. A proper fix would be
     # a value head or removing the cap.
-    if env.state().history_size >= max_depth:
-        return float((sigma * pred_r * mask).sum()) * regret_scale
-
+    # if env.state().history_size >= max_depth:
+    #    return float((sigma * pred_r * mask).sum()) * regret_scale
     if actor == traverser:
         # ── TRAVERSER NODE: branch every legal action ───────────────────────
         action_values = np.zeros(NUM_ACTIONS, dtype=np.float32)
