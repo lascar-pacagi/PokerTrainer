@@ -678,6 +678,156 @@ def rebel_episode(theta_v, theta_pi, buffer):
     refit(theta_v, buffer)                   # after many hands
 \end{lstlisting}
 
+\subsection{One solve under the microscope: a worked miniature}
+
+Steps 2--3 said ``build the subgame, solve it with CFR''. To actually
+\emph{see} that, shrink poker until the whole subgame fits in one picture:
+each player holds one of \textbf{three hand types} --- $A$ (the nuts), $B$
+(medium), $C$ (air) --- instead of 1326; the board is a flop, the pot is 6
+chips, there is a single bet size (pot), and the depth limit is the end of
+this street. Both belief vectors at the root are uniform
+$(\frac13,\frac13,\frac13)$. Here is the \emph{entire} subgame $G_t$ that
+step 2 builds:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]},
+  p1/.style={rectangle, draw=heroG, fill=heroG!12, thick, minimum size=6.5mm, inner sep=1pt},
+  p2/.style={circle, draw=villR, fill=villR!12, thick, minimum size=6.5mm, inner sep=1pt},
+  term/.style={rectangle, rounded corners=1mm, draw=black!50, fill=black!8,
+               font=\scriptsize, align=center, inner sep=2.5pt},
+  dleaf/.style={rectangle, rounded corners=1mm, draw=memO, fill=orange!15, thick,
+               font=\scriptsize, align=center, inner sep=2.5pt},
+  elab/.style={font=\scriptsize, fill=white, inner sep=1pt}]
+
+  % root belief bars (two groups, top-left)
+  \node[font=\tiny] at (0.55,6.45) {P1 range};
+  \draw[black!50] (0,5.6) -- (1.1,5.6);
+  \fill[heroG!70] (0.05,5.6) rectangle +(0.25,0.40);
+  \fill[heroG!70] (0.40,5.6) rectangle +(0.25,0.40);
+  \fill[heroG!70] (0.75,5.6) rectangle +(0.25,0.40);
+  \node[font=\tiny] at (0.17,5.45) {A}; \node[font=\tiny] at (0.52,5.45) {B};
+  \node[font=\tiny] at (0.87,5.45) {C};
+  \node[font=\tiny] at (2.25,6.45) {P2 range};
+  \draw[black!50] (1.7,5.6) -- (2.8,5.6);
+  \fill[villR!70] (1.75,5.6) rectangle +(0.25,0.40);
+  \fill[villR!70] (2.10,5.6) rectangle +(0.25,0.40);
+  \fill[villR!70] (2.45,5.6) rectangle +(0.25,0.40);
+  \node[font=\tiny] at (1.87,5.45) {A}; \node[font=\tiny] at (2.22,5.45) {B};
+  \node[font=\tiny] at (2.57,5.45) {C};
+  \node[font=\tiny, align=center] at (1.4,5.0) {root beliefs:\\ uniform};
+
+  % the tree
+  \node[p1] (root) at (6.0,6.0) {P1};
+  \node[font=\scriptsize, anchor=west] at (6.5,6.3) {pot 6, P1 to act};
+
+  \node[p2] (p2c) at (3.4,4.4) {P2};
+  \node[p2] (p2b) at (9.0,4.4) {P2};
+  \draw[->] (root) -- node[elab, above left=0pt and 2pt]{check} (p2c);
+  \draw[->] (root) -- node[elab, above right=0pt and 2pt]{bet 6} (p2b);
+
+  \node[dleaf] (L1) at (1.3,2.6) {street over\\ pot 6\\ $\Rightarrow$ ask the net};
+  \node[p1]   (p1f) at (5.0,2.6) {P1};
+  \draw[->] (p2c) -- node[elab, left=2pt]{check} (L1);
+  \draw[->] (p2c) -- node[elab, right=2pt]{bet 6} (p1f);
+
+  \node[term] (T1) at (3.6,0.7) {P2 wins 6\\ (arithmetic)};
+  \node[dleaf] (L2) at (6.4,0.7) {street over\\ pot 18\\ $\Rightarrow$ ask the net};
+  \draw[->] (p1f) -- node[elab, left=2pt]{fold} (T1);
+  \draw[->] (p1f) -- node[elab, right=2pt]{call} (L2);
+
+  \node[term] (T2) at (7.9,2.6) {P1 wins 6\\ (arithmetic)};
+  \node[dleaf] (L3) at (10.6,2.6) {street over\\ pot 18\\ $\Rightarrow$ ask the net};
+  \draw[->] (p2b) -- node[elab, left=2pt]{fold} (T2);
+  \draw[->] (p2b) -- node[elab, right=2pt]{call} (L3);
+
+  % legend
+  \node[term, anchor=west]  at (12.0,4.8) {fold terminal:\\ payoff known};
+  \node[dleaf, anchor=west] at (12.0,3.4) {depth leaf:\\ a turn card\\ would come next\\ $\Rightarrow$ $V(\beta_{\mathrm{leaf}};\theta_v)$};
+  \node[font=\scriptsize\itshape, align=left, anchor=west, text width=33mm] at (12.0,1.4)
+    {beliefs at a leaf are\\ \emph{not} the root beliefs:\\ they were Bayes'd\\ through the path's\\ actions (see below)};
+\end{tikzpicture}
+\end{center}
+
+Two kinds of leaves, and the distinction is the whole method. \textbf{Fold
+terminals} (gray) need no intelligence: the pot goes to the survivor,
+arithmetic. \textbf{Depth leaves} (orange) are where the street ends and a
+turn card would be dealt --- everything below them was cut off, so their
+value is a query to the value net, \emph{at the leaf's own PBS}: same board
+and pot, but belief vectors that have been pushed through every action on
+the path. Concretely, here is that Bayes push for the root action ``P1
+bets'', with numbers --- suppose the current CFR iterate has P1 betting
+$60\%$ of its $A$ hands, $10\%$ of $B$, $20\%$ of $C$ (a value-bet/bluff
+mix):
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]}]
+  % prior bars
+  \node[font=\scriptsize\bfseries] at (1.0,2.45) {P1's range before};
+  \draw[black!50] (0,0.8) -- (2.0,0.8);
+  \fill[heroG!70] (0.15,0.8) rectangle +(0.40,0.53);
+  \fill[heroG!70] (0.80,0.8) rectangle +(0.40,0.53);
+  \fill[heroG!70] (1.45,0.8) rectangle +(0.40,0.53);
+  \node[font=\tiny] at (0.35,0.62) {A 33\%}; \node[font=\tiny] at (1.00,0.62) {B 33\%};
+  \node[font=\tiny] at (1.65,0.62) {C 33\%};
+
+  % sigma box
+  \node[rectangle, rounded corners=1.5mm, draw=accent, fill=blue!5, thick,
+        align=center, font=\scriptsize] (sg) at (5.4,1.1)
+    {current iterate $\sigma$:\\ P(bet $\mid A$) = 0.6\\ P(bet $\mid B$) = 0.1\\ P(bet $\mid C$) = 0.2};
+  \draw[->, thick] (2.4,1.1) -- node[above, font=\scriptsize]{$\times$} (3.6,1.1);
+  \draw[->, thick] (7.2,1.1) -- node[above, font=\scriptsize, align=center]
+      {renormalize\\ $(6{:}1{:}2)/9$} (9.0,1.1);
+
+  % posterior bars
+  \node[font=\scriptsize\bfseries] at (10.6,2.45) {after ``P1 bets''};
+  \draw[black!50] (9.5,0.8) -- (11.7,0.8);
+  \fill[heroG!70] (9.65,0.8)  rectangle +(0.40,1.07);
+  \fill[heroG!70] (10.30,0.8) rectangle +(0.40,0.18);
+  \fill[heroG!70] (10.95,0.8) rectangle +(0.40,0.36);
+  \node[font=\tiny] at (9.85,0.62)  {A 67\%}; \node[font=\tiny] at (10.50,0.62) {B 11\%};
+  \node[font=\tiny] at (11.15,0.62) {C 22\%};
+\end{tikzpicture}
+\end{center}
+
+This one picture is three lines of the listing at once: it is the
+\texttt{bayes\_update} that produces the next root PBS, it is what happens
+\emph{inside} the tree between a node and its child, and it is why the
+opponent must respect the bet --- the bettor's range really did get stronger
+(67\% nuts), yet not pure (22\% air), because the \emph{solver} chose that
+bluff ratio.
+
+Now ``solve it'' (step 3) is no mystery: run volume 1's tabular CFR on this
+little tree --- per-hand regret tables at the four decision nodes, sweeps
+$t = 1..T_{\mathrm{cfr}}$ --- with one twist at the orange leaves:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
+  box/.style={rectangle, rounded corners=1.5mm, thick, align=center,
+              font=\scriptsize, minimum height=13mm}]
+  \node[box, draw=memO, fill=orange!10, minimum width=40mm] (leaf) at (0,0)
+    {PBS at leaf L3:\\ board + pot 18\\ P1 beliefs (67,11,22)\%\\ P2 beliefs (..,..,..)\%};
+  \node[box, draw=villR, fill=red!5, minimum width=22mm] (net) at (5.6,0)
+    {value net\\ $V(\cdot\,;\theta_v)$};
+  \node[box, draw=accent, fill=blue!5, minimum width=42mm] (out) at (11.2,0)
+    {values \emph{per hand}:\\ P1: $A{:}{+}9$~~$B{:}{+}1$~~$C{:}{-}7$\\ P2: $A{:}{+}9$~~$B{:}{-}2$~~$C{:}{-}8$};
+  \draw[->, very thick] (leaf) -- (net);
+  \draw[->, very thick] (net) -- (out);
+  \node[font=\scriptsize\itshape] at (5.6,-1.35)
+    {(numbers illustrative; what matters is the \emph{shape}: beliefs in, one value per hand out)};
+\end{tikzpicture}
+\end{center}
+
+And here is the subtle point that makes everything cohere: \textbf{the
+beliefs at a leaf change as CFR iterates}. Iteration 5's $\sigma$ bets a
+different mix than iteration 80's, so the \emph{same} leaf L3 is reached
+with \emph{different} belief vectors, and the net must answer differently
+--- a strong-range bet-call leaf is worth more to P1 than a bluff-heavy one.
+That is exactly why $V$ takes the beliefs as input: one network must value
+\emph{every possible range shape} at every public situation. Scaling back
+up to real HUNL changes only sizes --- 3 hand types become 1326, one bet
+size becomes a menu, one street becomes the rest of the round. Nothing
+conceptual changes.
+
 \begin{intuition}
 \textbf{Where Deep CFR and ReBeL put the neural network.} Deep CFR's nets
 \emph{replace the regret tables} inside one global solve. ReBeL's net replaces
@@ -686,6 +836,76 @@ sees a small window of the game, and the net summarizes everything below the
 window. That is exactly AlphaZero's division of labor, transplanted to
 imperfect information --- which is why the paper's title says ``RL $+$
 Search''.
+\end{intuition}
+
+\subsection{Two phrases from the listing, unpacked}
+
+\textbf{``Depth-limited subgame'' --- where exactly is the cut, and why
+there?} Picture the \emph{full} game tree hanging below the current PBS: all
+betting sequences of this street, then $\sim$47 possible turn cards
+\emph{each} with all their betting sequences, then $\sim$46 rivers each with
+theirs. The subgame keeps only the top slice --- every betting sequence of
+the \emph{current} street --- and cuts exactly where the next card would be
+dealt, because that chance node is where the tree multiplies by 47 and
+becomes hopeless:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]}]
+  % full game triangle
+  \draw[thick, accent, fill=blue!5]
+      (0,3.6) -- (-2.6,0.4) -- (2.6,0.4) -- cycle;
+  \fill[black!12] (-1.72,-1.5) -- (-2.6,0.4) -- (2.6,0.4) -- (1.72,-1.5)
+      -- cycle;
+  \draw[black!40] (-1.72,-1.5) -- (-2.6,0.4)  (2.6,0.4) -- (1.72,-1.5);
+  \node[circle, draw=heroG, fill=heroG!15, thick, inner sep=2pt] at (0,3.6) {};
+  \node[font=\scriptsize, anchor=west] at (0.3,3.7) {root: current PBS};
+  \node[font=\scriptsize, align=center] at (0,1.6)
+      {solved exactly\\ (this street's betting,\\ the miniature above)};
+  \draw[very thick, dashed, memO] (-3.4,0.4) -- (3.4,0.4)
+      node[right, font=\scriptsize\bfseries, color=memO, align=left]
+      {the cut: betting round over,\\ a turn card comes next};
+  \node[font=\scriptsize, align=center, color=black!60] at (0,-0.7)
+      {never built: 47 turn cards $\times$ betting $\times$ 46 rivers $\times$ \dots\\
+       entire region summarized by ONE net call per leaf:\\
+       $V(\beta_{\mathrm{leaf}};\theta_v)$ $=$ expected value over all of it,\\
+       per hand, under equilibrium play};
+\end{tikzpicture}
+\end{center}
+
+A chess engine does the same thing when it searches 12 plies and then calls
+its evaluation function instead of playing to checkmate. ReBeL's
+``evaluation function'' just answers a harder question --- per hand and
+belief-aware --- and is trained, not hand-written. The cut placement is the
+\textbf{dial between compute and trust}: cut deeper and you do more exact
+CFR work but lean on the net less; cut shallower and search is cheap but the
+net's approximation error ($\varepsilon_{\mathrm{approx}}$, volume 3)
+dominates. Cutting at the chance node is simply the sweet spot where one net
+call replaces the largest possible amount of tree.
+
+\textbf{``warm\_start=theta\_pi'' --- what is being warmed, and why is it
+legal?} Cold CFR starts from all-zero regrets, i.e.\ from the uniform
+strategy, and its first iterations are spent un-learning nonsense (volume 3
+showed early iterates are garbage --- that is why Linear CFR down-weights
+them). But ReBeL has solved \emph{thousands} of similar subgames before, and
+the \textbf{policy net} $\theta_\pi$ has been trained on their outcomes: shown
+a PBS, it predicts a near-final strategy $\hat\sigma$ for every infoset of
+the new subgame. Warm starting means: initialize each node's regret table so
+that regret matching reproduces $\hat\sigma$ at iteration 1 (there is a
+principled recipe for this --- Brown \& Sandholm's strategy-based warm start
+--- that behaves \emph{as if} those early iterations had genuinely been
+played, so convergence guarantees survive). CFR then spends its
+$T_{\mathrm{cfr}}$ iterations \emph{correcting} the net's guess for this
+exact situation instead of rediscovering poker from uniform. Same answer,
+far fewer iterations.
+
+\begin{intuition}
+The two networks accelerate the two axes of the same solver. The
+\textbf{value net cuts the tree in space} (leaves replace everything below
+the chance node); the \textbf{policy net cuts the solve in time} (start near
+the answer instead of at uniform). Remove both and ReBeL degenerates into
+exact tabular CFR on the full game --- correct and hopeless. The nets are
+not the player; they are compression of past search, spent to make the next
+search affordable.
 \end{intuition}
 
 \subsection{What the value net actually sees and says}
