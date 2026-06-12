@@ -272,15 +272,71 @@ i.e.\ ``action $a$ versus what I currently do on average at $I$''.
 
 Vanilla CFR then loops: traverse the \emph{whole} tree, accumulate
 $R_T(I,a)=\sum_t r_t(I,a)$ at every infoset, update every $\sigma$ by regret
-matching, repeat. Two practical refinements matter for us:
+matching, repeat. Here it is in full --- the bookkeeping to watch is the two
+\emph{reach probabilities} carried down the tree, because each one is used for
+a different purpose at the update:
+
+\begin{lstlisting}[style=py, caption={Tabular vanilla CFR (two players, chance sampled once per traversal). The asymmetry to internalize: regrets are weighted by the \emph{opponent's} reach (that is what makes values ``counterfactual''), while the average strategy is weighted by \emph{your own} reach (you only average a decision where you would actually arrive).}]
+R = defaultdict(zeros)     # cumulative regrets,  one vector per infoset
+S = defaultdict(zeros)     # cumulative strategy, one vector per infoset
+
+def cfr(state, t, reach):
+    """reach[p] = probability that player p's OWN choices so far would
+    lead them here. Returns (u_0, u_1), expected values under sigma_t."""
+    if state.is_terminal():
+        return state.payoffs()                  # zero-sum pair
+
+    I, p  = infoset(state), state.to_act()
+    sigma = regret_matching(R[I], state.legal())
+
+    v, v_I = {}, [0.0, 0.0]
+    for a in state.legal():
+        r = list(reach)
+        r[p] *= sigma[a]                        # my move scales MY reach
+        v[a] = cfr(state.child(a), t, r)
+        v_I[0] += sigma[a] * v[a][0]
+        v_I[1] += sigma[a] * v[a][1]
+
+    for a in state.legal():                     # ── the two updates ──
+        R[I][a] += reach[1 - p] * (v[a][p] - v_I[p])   # OPPONENT's reach
+    S[I] += reach[p] * sigma                           # MY OWN reach
+    return v_I
+
+def solve(T):
+    for t in range(1, T + 1):
+        cfr(deal_random_hand(), t, reach=[1.0, 1.0])   # chance sampled
+    return {I: S[I] / S[I].sum() for I in S}    # AVERAGE strategy ~ Nash
+\end{lstlisting}
+
+Two practical refinements matter for us --- and both are tiny edits to the
+update lines above:
 
 \begin{itemize}[leftmargin=1.4em, itemsep=1pt]
 \item \textbf{Linear CFR} (Brown \& Sandholm 2019): weight iteration $t$'s
       contributions by $t$. Early iterations are garbage (the strategy was
       random); weighting by $t$ discounts them and speeds convergence a lot.
-\item \textbf{CFR$^{+}$}: clip cumulative regrets at zero. (Used by the
-      commercial GTO solvers; Deep CFR uses Linear CFR instead.)
+\item \textbf{CFR$^{+}$} (Tammelin 2014): clip cumulative regrets at zero
+      after every update, so an action can recover quickly once it stops
+      being bad. (Used by the commercial GTO solvers and by Cepheus to
+      essentially solve limit hold'em; Deep CFR uses Linear CFR instead.)
 \end{itemize}
+
+\begin{lstlisting}[style=py, caption={CFR$^{+}$ and Linear CFR are three-line edits to the two update lines.}]
+# ── vanilla CFR ──────────────────────────────────────────────────────
+R[I][a] += reach[1 - p] * (v[a][p] - v_I[p])
+S[I]    += reach[p] * sigma
+
+# ── CFR+ : clip cumulative regret at 0; average weighted by t ───────
+R[I][a]  = max(R[I][a] + reach[1 - p] * (v[a][p] - v_I[p]), 0.0)
+S[I]    += t * reach[p] * sigma
+# (CFR+ also alternates: update one player's regrets per traversal)
+
+# ── Linear CFR : weight EVERYTHING by the iteration number t ────────
+R[I][a] += t * reach[1 - p] * (v[a][p] - v_I[p])
+S[I]    += t * reach[p] * sigma
+# equivalent in Deep CFR: store plain samples tagged with t, and weight
+# the regression loss by t  (exactly what trainer/cfr/train.py does)
+\end{lstlisting}
 
 \begin{trap}
 CFR's guarantee is about the \emph{average} strategy. Looking at the
