@@ -775,8 +775,10 @@ mix):
   \fill[heroG!70] (0.15,0.8) rectangle +(0.40,0.53);
   \fill[heroG!70] (0.80,0.8) rectangle +(0.40,0.53);
   \fill[heroG!70] (1.45,0.8) rectangle +(0.40,0.53);
-  \node[font=\tiny] at (0.35,0.62) {A 33\%}; \node[font=\tiny] at (1.00,0.62) {B 33\%};
-  \node[font=\tiny] at (1.65,0.62) {C 33\%};
+  \node[font=\tiny] at (0.35,1.50) {33\%}; \node[font=\tiny] at (1.00,1.50) {33\%};
+  \node[font=\tiny] at (1.65,1.50) {33\%};
+  \node[font=\tiny] at (0.35,0.62) {A}; \node[font=\tiny] at (1.00,0.62) {B};
+  \node[font=\tiny] at (1.65,0.62) {C};
 
   % sigma box
   \node[rectangle, rounded corners=1.5mm, draw=accent, fill=blue!5, thick,
@@ -792,8 +794,10 @@ mix):
   \fill[heroG!70] (9.65,0.8)  rectangle +(0.40,1.07);
   \fill[heroG!70] (10.30,0.8) rectangle +(0.40,0.18);
   \fill[heroG!70] (10.95,0.8) rectangle +(0.40,0.36);
-  \node[font=\tiny] at (9.85,0.62)  {A 67\%}; \node[font=\tiny] at (10.50,0.62) {B 11\%};
-  \node[font=\tiny] at (11.15,0.62) {C 22\%};
+  \node[font=\tiny] at (9.85,2.05)  {67\%}; \node[font=\tiny] at (10.50,1.16) {11\%};
+  \node[font=\tiny] at (11.15,1.34) {22\%};
+  \node[font=\tiny] at (9.85,0.62)  {A}; \node[font=\tiny] at (10.50,0.62) {B};
+  \node[font=\tiny] at (11.15,0.62) {C};
 \end{tikzpicture}
 \end{center}
 
@@ -894,21 +898,78 @@ about \emph{when} those calls happen: not at build time --- a leaf has no
 value until beliefs reach it. The leaves are priced inside the solve, anew
 at every CFR iteration, as the previous section showed.)
 
-\textbf{``warm\_start=theta\_pi'' --- what is being warmed, and why is it
-legal?} Cold CFR starts from all-zero regrets, i.e.\ from the uniform
-strategy, and its first iterations are spent un-learning nonsense (volume 3
-showed early iterates are garbage --- that is why Linear CFR down-weights
-them). But ReBeL has solved \emph{thousands} of similar subgames before, and
-the \textbf{policy net} $\theta_\pi$ has been trained on their outcomes: shown
-a PBS, it predicts a near-final strategy $\hat\sigma$ for every infoset of
-the new subgame. Warm starting means: initialize each node's regret table so
-that regret matching reproduces $\hat\sigma$ at iteration 1 (there is a
-principled recipe for this --- Brown \& Sandholm's strategy-based warm start
---- that behaves \emph{as if} those early iterations had genuinely been
-played, so convergence guarantees survive). CFR then spends its
-$T_{\mathrm{cfr}}$ iterations \emph{correcting} the net's guess for this
-exact situation instead of rediscovering poker from uniform. Same answer,
-far fewer iterations.
+\textbf{``warm\_start=theta\_pi'' --- what exactly is being warmed?}
+Start from what CFR's internal state \emph{is}: nothing but the regret
+tables $R[I]$ --- the strategy is always derived from them by regret
+matching, $\sigma(a) \propto R^{+}(a)$. So ``starting CFR'' \emph{means}
+choosing the initial contents of those tables. Cold start: all zeros
+$\Rightarrow$ iteration 1 plays uniform $\Rightarrow$ the first iterations
+are spent un-learning nonsense (volume 3 showed early iterates are garbage).
+
+Now the trick, with numbers. Regret matching only looks at the
+\emph{proportions} of the positive regrets. So if the policy net, shown this
+subgame's PBS, predicts $\hat\sigma = (\text{bet } 70\%,\ \text{check }
+30\%)$ at some infoset, then initializing that infoset's table to
+\[
+R_{\mathrm{init}} = w \cdot (0.7,\; 0.3)
+\qquad\text{(any scale } w > 0\text{)}
+\]
+makes regret matching reproduce exactly $(70\%, 30\%)$ at iteration 1. Do
+this at every infoset of the subgame, and CFR \emph{starts at the net's
+guess} instead of at uniform.
+
+The scale $w$ is not cosmetic --- it encodes \textbf{how much to trust the
+guess}, in units of ``iterations' worth of evidence''. Too small and one
+iteration of real regrets washes the guess out (nothing gained); too large
+and CFR becomes too stubborn to repair the net's mistakes. Brown \&
+Sandholm's strategy-based warm start is the principled recipe for choosing
+$w$ so the tables look \emph{as if} the guess had been earned by genuinely
+played iterations --- which is precisely why the convergence guarantee
+survives.
+
+And the guess \emph{is} repairable --- that is the whole point of still
+running CFR. Suppose the net says ``bet 70\%'' but in \emph{this} exact
+subgame (these ranges, these sizes) betting is actually mediocre. Iteration
+1 plays 70/30; the traversal reveals check's values are higher; regret flows
+onto check; within a few dozen iterations $\sigma$ has slid to, say, 40/60.
+The net saved the long journey from uniform; CFR still has the last word:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]}]
+  \draw[->, thick] (0,0) -- (8.8,0);
+  \node[font=\scriptsize] at (7.6,-0.35) {CFR iterations};
+  \draw[->, thick] (0,0) -- (0,3.2);
+  \node[rotate=90, font=\scriptsize] at (-0.45,1.6) {exploitability};
+  % "good enough" line
+  \draw[dashed, black!50] (0,0.55) -- (8.5,0.55);
+  \node[font=\tiny, color=black!60, anchor=south east] at (8.5,0.58)
+      {good enough to play};
+  % cold curve
+  \draw[very thick, villR] plot[smooth] coordinates
+      {(0.0,2.7) (1.0,1.85) (2.0,1.3) (3.0,0.95) (4.0,0.74) (5.0,0.62) (6.0,0.55) (7.4,0.47)};
+  \node[font=\scriptsize, color=villR, anchor=west] at (3.2,1.65)
+      {cold start: from uniform};
+  \draw[->, villR!70] (3.15,1.55) -- (2.45,1.18);
+  % warm curve
+  \draw[very thick, heroG] plot[smooth] coordinates
+      {(0.0,1.0) (0.8,0.72) (1.6,0.58) (2.4,0.55) (3.4,0.50) (5.0,0.46) (7.4,0.44)};
+  \node[font=\scriptsize, color=heroG, anchor=west] at (4.4,1.0)
+      {warm start: from the net's guess $\hat\sigma$};
+  \draw[->, heroG!70] (4.35,0.9) -- (3.9,0.56);
+  % crossing markers + saved span
+  \fill[black!70] (2.4,0.55) circle (1.4pt); \fill[black!70] (6.0,0.55) circle (1.4pt);
+  \draw[<->, thick, black!60] (2.4,0.25) -- (6.0,0.25);
+  \node[font=\tiny, color=black!60] at (4.2,0.10) {iterations saved};
+\end{tikzpicture}
+\end{center}
+
+Last natural question: \emph{if the net already knows a near-final strategy,
+why not skip CFR and just play $\hat\sigma$?} Because $\hat\sigma$ is an
+unverified generalization --- the net has never seen \emph{this exact} PBS,
+and playing its raw guess would be exploitable wherever the net happens to
+be wrong, with no guarantee left. Warm start is ``trust, then verify'': the
+net proposes the usual route, the search drives it against today's actual
+traffic.
 
 \begin{intuition}
 The two networks accelerate the two axes of the same solver. The
