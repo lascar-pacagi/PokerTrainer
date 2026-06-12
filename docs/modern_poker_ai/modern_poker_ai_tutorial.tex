@@ -614,13 +614,16 @@ played, beliefs update, possibly new board cards arrive):
   \draw[->, thick] (b2) -- (dots);
   \draw[->, thick] (dots) -- (bT);
 
-  \node[buf, minimum width=86mm] (buffer) at (4.4,-2.0)
-      {value buffer: one training pair $(\beta_t,\; v_t)$ per solve};
+  \node[buf, minimum width=86mm, align=center] (buffer) at (4.4,-2.2)
+      {training buffers --- each solve feeds BOTH:\\
+       value target $(\beta_t,\; v_t)$ \qquad policy target $(\beta_t,\; \bar\sigma_t)$};
   \draw[->, dashed, memO] (b0.south) -- (buffer.north -| b0.south);
   \draw[->, dashed, memO] (b1.south) -- (buffer.north -| b1.south);
   \draw[->, dashed, memO] (b2.south) -- (buffer.north -| b2.south);
-  \node[net] (vnet) at (11.4,-2.0) {refit $V(\cdot\,;\theta_v)$\\ after many hands};
-  \draw[->, thick, memO] (buffer) -- (vnet);
+  \node[net] (vnet) at (11.4,-1.5) {refit $V(\cdot\,;\theta_v)$:\\ value regression};
+  \node[net] (pinet) at (11.4,-3.0) {refit $\pi(\cdot\,;\theta_\pi)$:\\ policy distillation\\ $\to$ next warm starts};
+  \draw[->, thick, memO] (buffer.east) -- (vnet.west);
+  \draw[->, thick, memO] (buffer.east) -- (pinet.west);
 \end{tikzpicture}
 \end{center}
 
@@ -644,11 +647,15 @@ At each decision point, six things happen, in order:
   \emph{co-evolve} --- every iteration re-prices the leaves under the new
   beliefs. The policy net $\theta_\pi$ warm-starts the iterations so fewer
   are needed.
-\item \textbf{Store a training pair}: $(\beta_t,\, v_t)$, where $v_t$ is the
-  per-hand value vector of the root under the \emph{average} of the
-  $T_{\mathrm{cfr}}$ policies --- i.e.\ ``what this PBS is worth under
-  near-equilibrium play''. This is the label $\theta_v$ will later regress
-  on, exactly like AlphaZero labels positions with search outcomes.
+\item \textbf{Store two training pairs} --- one solve feeds both networks.
+  Let $\bar\sigma_t$ be the \emph{average} of the $T_{\mathrm{cfr}}$
+  policies (the object volume 1 proved converges). For the \textbf{value
+  net}: $(\beta_t,\, v_t)$, where $v_t$ is the per-hand value vector of the
+  root under $\bar\sigma_t$ --- ``what this PBS is worth under
+  near-equilibrium play'', AlphaZero-style value labels. For the
+  \textbf{policy net}: $(\beta_t,\, \bar\sigma_t)$ itself, the root's
+  per-hand action distributions --- distilled later by $\theta_\pi$, these
+  become tomorrow's warm starts.
 \item \textbf{Choose what to actually play}: pick \emph{one random
   iteration} $t' \sim \mathrm{uniform}(1..T_{\mathrm{cfr}})$ and use its
   policy $\sigma_{t'}$ --- \emph{not} the average. This is the
@@ -661,14 +668,16 @@ At each decision point, six things happen, in order:
   (if a street ends, the dealt board cards update the PBS too).
 \end{enumerate}
 
-When the hand reaches a terminal PBS, the episode's pairs join the buffer;
-after many hands, $\theta_v$ is refit on the buffer and $\theta_\pi$ on the
-stored search policies. \textbf{At test time against a human, the identical
-loop runs minus the stores} --- search-with-net-leaves \emph{is} the player;
-training merely makes the net worth searching with.
+When the hand reaches a terminal PBS, the episode's pairs join the two
+buffers; after many hands, $\theta_v$ is refit on the value buffer
+(regression) and $\theta_\pi$ is distilled from the policy buffer ---
+closing the loop: \emph{today's average policies become tomorrow's warm
+starts}. \textbf{At test time against a human, the identical loop runs
+minus the stores} --- search-with-net-leaves \emph{is} the player; training
+merely makes the nets worth searching with.
 
 \begin{lstlisting}[style=py, caption={ReBeL's training loop --- the six steps above, in code. The same machinery runs at test time, minus the buffer writes.}]
-def rebel_episode(theta_v, theta_pi, buffer):
+def rebel_episode(theta_v, theta_pi, v_buffer, pi_buffer):
     deal = sample_world()                    # real cards for both seats
     beta = initial_pbs()                     # (1) blinds, uniform beliefs
     while not beta.is_terminal():
@@ -676,14 +685,18 @@ def rebel_episode(theta_v, theta_pi, buffer):
         policies = run_cfr(G, T_cfr,         # (3) tabular CFR; EVERY iter:
                            warm_start=theta_pi)  # leaf beliefs from current
                                              # sigma -> query V(.; theta_v)
-        buffer.add(beta,                     # (4) value target: root values
-                   value_of_root(G, average(policies)))  # of the AVERAGE
+        sigma_avg = average(policies)        # the converging object (vol. 1)
+        v_buffer.add(beta,                   # (4a) value target: root values
+                     value_of_root(G, sigma_avg))      # under the average
+        pi_buffer.add(beta,                  # (4b) policy target: the root's
+                      sigma_avg.at_root())   # per-hand action distributions
         sigma = policies[randint(1, T_cfr)]  # (5) play a RANDOM iterate
                                              #     (why: close-up, Q2)
         hand = deal[beta.to_act()]
         a = sample(sigma[hand])              # (6) act with the real cards...
         beta = bayes_update(beta, sigma, a)  #     ...Bayes BOTH beliefs
-    refit(theta_v, buffer)                   # after many hands
+    refit(theta_v, v_buffer)                 # after many hands: regression
+    refit(theta_pi, pi_buffer)               # + distillation -> warm starts
 \end{lstlisting}
 
 \subsection{One solve under the microscope: a worked miniature}
