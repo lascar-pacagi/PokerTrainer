@@ -906,6 +906,25 @@ choosing the initial contents of those tables. Cold start: all zeros
 $\Rightarrow$ iteration 1 plays uniform $\Rightarrow$ the first iterations
 are spent un-learning nonsense (volume 3 showed early iterates are garbage).
 
+\begin{trap}
+\textbf{Where does $\hat\sigma$ come from? Not from the value net --- and it
+could not.} ReBeL trains \emph{two separate} networks. The value net
+$\theta_v$ answers ``what is this leaf worth, per hand'' and serves the
+depth-limit leaves. The policy net $\theta_\pi$ outputs \emph{action
+probabilities directly}, per hand, and is trained by distillation: its
+targets are the average strategies that past subgame solves produced (just
+as AlphaZero's policy head distills MCTS visit counts). One might hope to
+skip it and derive probabilities from values --- a softmax over action
+values, say. Equilibrium play forbids this: \emph{at a mixed equilibrium,
+every action in the mix has the same expected value} --- that is what being
+willing to mix means. In a 70/30 bet/check spot, bet and check are worth
+exactly the same \emph{to you}; the 70/30 is not there because betting is
+``better'', it is what keeps the \emph{opponent} indifferent between her
+responses. The mixing ratio is a property of the equilibrium, invisible in
+your own values --- probabilities must be solved for or distilled, never
+read off values.
+\end{trap}
+
 Now the trick, with numbers. Regret matching only looks at the
 \emph{proportions} of the positive regrets. So if the policy net, shown this
 subgame's PBS, predicts $\hat\sigma = (\text{bet } 70\%,\ \text{check }
