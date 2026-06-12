@@ -630,13 +630,20 @@ At each decision point, six things happen, in order:
 \item \textbf{Freeze the current PBS} $\beta_t$: board, pot, and both belief
   vectors as they stand.
 \item \textbf{Build the depth-limited subgame} $G_t$ rooted at $\beta_t$ ---
-  roughly the rest of the current betting round; wherever new cards would be
-  dealt, the tree stops and the value net $V(\cdot\,;\theta_v)$ will answer.
+  roughly the rest of the current betting round, stopping wherever new cards
+  would be dealt. Building fixes the \emph{shape only}: no value is attached
+  to any leaf yet, because a leaf's value depends on the beliefs \emph{at
+  that leaf}, and those do not exist until a strategy says how players reach
+  it --- which is exactly what the next step is about to compute.
 \item \textbf{Solve it}: $T_{\mathrm{cfr}}$ iterations of plain
-  \emph{tabular} CFR inside $G_t$ (this is where volume 1's algorithm
-  literally runs, thousands of times per hand). The policy net
-  $\theta_\pi$ warm-starts the iterations so fewer are needed; every leaf
-  evaluation is a query to the value net.
+  \emph{tabular} CFR inside $G_t$ (volume 1's algorithm, literally), with
+  leaf evaluation happening \emph{inside every iteration}: the current
+  iterate's $\sigma$ induces beliefs at each leaf (Bayes along the path),
+  the net is queried at that freshly built leaf PBS, and the returned
+  per-hand values feed the regret updates. Strategy and leaf values
+  \emph{co-evolve} --- every iteration re-prices the leaves under the new
+  beliefs. The policy net $\theta_\pi$ warm-starts the iterations so fewer
+  are needed.
 \item \textbf{Store a training pair}: $(\beta_t,\, v_t)$, where $v_t$ is the
   per-hand value vector of the root under the \emph{average} of the
   $T_{\mathrm{cfr}}$ policies --- i.e.\ ``what this PBS is worth under
@@ -665,9 +672,10 @@ def rebel_episode(theta_v, theta_pi, buffer):
     deal = sample_world()                    # real cards for both seats
     beta = initial_pbs()                     # (1) blinds, uniform beliefs
     while not beta.is_terminal():
-        G = depth_limited_subgame(beta)      # (2) leaves -> V(.; theta_v)
-        policies = run_cfr(G, T_cfr,         # (3) tabular CFR inside G,
-                           warm_start=theta_pi)
+        G = depth_limited_subgame(beta)      # (2) SHAPE only, no values yet
+        policies = run_cfr(G, T_cfr,         # (3) tabular CFR; EVERY iter:
+                           warm_start=theta_pi)  # leaf beliefs from current
+                                             # sigma -> query V(.; theta_v)
         buffer.add(beta,                     # (4) value target: root values
                    value_of_root(G, average(policies)))  # of the AVERAGE
         sigma = policies[randint(1, T_cfr)]  # (5) play a RANDOM iterate
@@ -866,9 +874,10 @@ becomes hopeless:
       {the cut: betting round over,\\ a turn card comes next};
   \node[font=\scriptsize, align=center, color=black!60] at (0,-0.7)
       {never built: 47 turn cards $\times$ betting $\times$ 46 rivers $\times$ \dots\\
-       entire region summarized by ONE net call per leaf:\\
-       $V(\beta_{\mathrm{leaf}};\theta_v)$ $=$ expected value over all of it,\\
-       per hand, under equilibrium play};
+       summarized by net calls $V(\beta_{\mathrm{leaf}};\theta_v)$ ---
+       one per leaf \emph{per CFR iteration},\\
+       because the leaf beliefs move with the evolving $\sigma$;\\
+       each answer = expected value of all of it, per hand};
 \end{tikzpicture}
 \end{center}
 
@@ -879,8 +888,11 @@ belief-aware --- and is trained, not hand-written. The cut placement is the
 \textbf{dial between compute and trust}: cut deeper and you do more exact
 CFR work but lean on the net less; cut shallower and search is cheap but the
 net's approximation error ($\varepsilon_{\mathrm{approx}}$, volume 3)
-dominates. Cutting at the chance node is simply the sweet spot where one net
-call replaces the largest possible amount of tree.
+dominates. Cutting at the chance node is simply the sweet spot where each
+net call replaces the largest possible amount of tree. (And to be precise
+about \emph{when} those calls happen: not at build time --- a leaf has no
+value until beliefs reach it. The leaves are priced inside the solve, anew
+at every CFR iteration, as the previous section showed.)
 
 \textbf{``warm\_start=theta\_pi'' --- what is being warmed, and why is it
 legal?} Cold CFR starts from all-zero regrets, i.e.\ from the uniform
