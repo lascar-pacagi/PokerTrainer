@@ -402,16 +402,121 @@ def act(history, board, my_hand):
 # and call resolve() again (nested re-solving).
 \end{lstlisting}
 
+\subsection{Close-up: the two questions everyone asks}
+
+\textbf{Q1 --- an opponent bets a size that is not in the tree. What happens,
+mechanically?} Suppose the subgame Pluribus just solved offered the opponent
+three sizes at some node --- $\{0.5\,\text{pot},\, 1\,\text{pot},\,
+\text{all-in}\}$ --- and the human bets $0.37$ pot. The solution Pluribus is
+holding has \emph{no entry} for what just happened. The historical fix
+(``action translation'': round $0.37$ to the nearest size and pretend) is
+exactly the leak humans learned to attack by betting \emph{between} the
+abstraction points. Pluribus instead rebuilds:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
+  onode/.style={circle, draw=villR, fill=villR!10, thick, minimum size=7mm, inner sep=1pt},
+  tnode/.style={rectangle, rounded corners=1mm, draw=black!55, fill=black!4,
+                font=\scriptsize, inner sep=2.5pt},
+  newb/.style={rectangle, rounded corners=1mm, draw=heroG, fill=heroG!12, very thick,
+               font=\scriptsize, inner sep=2.5pt}]
+  % BEFORE
+  \node[font=\scriptsize\bfseries] at (0,2.6) {tree just solved};
+  \node[onode] (o1) at (0,1.8) {O};
+  \node[tnode] (b1) at (-1.7,0.5) {0.5 pot};
+  \node[tnode] (b2) at (0,0.5) {1 pot};
+  \node[tnode] (b3) at (1.7,0.5) {all-in};
+  \draw[->] (o1) -- (b1); \draw[->] (o1) -- (b2); \draw[->] (o1) -- (b3);
+  \node[font=\scriptsize, color=villR] at (0,-0.4)
+      {human bets \textbf{0.37 pot}: no branch!};
+
+  \draw[->, very thick] (3.3,1.0) -- node[above, font=\scriptsize, align=center]
+      {rebuild +\\ re-solve} (5.2,1.0);
+
+  % AFTER
+  \node[font=\scriptsize\bfseries] at (9.2,2.6) {new (augmented) subgame};
+  \node[onode] (o2) at (9.2,1.8) {O};
+  \node[tnode] (c1) at (7.0,0.5) {0.5 pot};
+  \node[tnode] (c2) at (8.5,0.5) {1 pot};
+  \node[newb] (c3) at (10.0,0.5) {0.37 pot};
+  \node[tnode] (c4) at (11.6,0.5) {all-in};
+  \draw[->] (o2) -- (c1); \draw[->] (o2) -- (c2);
+  \draw[->, heroG, very thick] (o2) -- (c3); \draw[->] (o2) -- (c4);
+  \node[font=\scriptsize, color=heroG!60!black, align=center] at (9.2,-0.55)
+      {the new equilibrium decides \emph{which hands} bet 0.37 pot\\
+       $\to$ posterior range comes from the solve itself, no rounding};
+\end{tikzpicture}
+\end{center}
+
+\begin{enumerate}[leftmargin=1.6em, itemsep=1pt]
+\item \textbf{Rebuild}: a fresh subgame rooted just before the bet, with the
+  opponent's action set at that node \emph{augmented} by the exact
+  $0.37$-pot size.
+\item \textbf{Ranges at the new root} are taken from \emph{before} the
+  off-tree action --- everything up to that moment was on-model, so Bayes is
+  still well-defined.
+\item \textbf{Re-solve} the augmented subgame as usual (depth limit,
+  continuation leaves, whole-range Linear CFR).
+\item The subtle part: the new equilibrium contains \textbf{a strategy for
+  the opponent at the augmented node} --- it computes \emph{which hands
+  would bet $0.37$ pot at equilibrium}. Bayes against \emph{that} computed
+  strategy gives the range going forward. The off-tree action is never
+  mapped to a fiction; the solver \emph{invents its correct interpretation}
+  as part of the equilibrium.
+\item Another off-tree size on a later street? Do it all again --- hence
+  \emph{nested} re-solving.
+\end{enumerate}
+
+\begin{intuition}
+The asymmetry to remember: Pluribus's \emph{own} bet sizes can stay few ---
+it chooses them. It is the \emph{opponent's} freedom that makes the full
+game impossible to pre-solve. Nested re-solving prices each opponent choice
+\emph{at the moment it happens} instead of pre-computing responses to a
+continuum --- the same ``pay compute only for situations that actually
+arise'' logic that motivates search in the first place. (Preflop, where
+Pluribus plays the blueprint directly, the action abstraction is dense
+enough that rounding a rare off-tree size costs little.)
+\end{intuition}
+
+\textbf{Q2 --- the ranges assume opponents follow the blueprint. What if
+they just\dots\ don't?} Separate three cases.
+
+\emph{Case 1: the deviation is an off-tree action.} That is Q1 ---
+structural, fully handled; the augmented equilibrium even defines what the
+new action ``means''.
+
+\emph{Case 2: on-tree actions, wrong frequencies.} The human raises twice as
+often as the blueprint would. Pluribus's posterior range for them is then
+simply \emph{wrong} --- it credits the line with blueprint frequencies. And
+Pluribus does \emph{nothing} about it: by deliberate design it has no
+opponent modeling and never adapts to observed tendencies. Partly
+robustness (an adapting bot can be manipulated by feigned tendencies for
+later betrayal), partly principle: its defense is \textbf{balance, not
+mind-reading}. A range is a statement about a \emph{model}, not about the
+human --- Bayes answers ``which hands would have taken this line \emph{if}
+the opponent played the assumed strategy''.
+
+\emph{Case 3: so why is playing on-model still sound?} Zero-sum equilibrium
+logic: the strategy Pluribus computes is (approximately) unexploitable
+\emph{within the model game}, and an opponent playing off-model frequencies
+is, from the model's viewpoint, deviating from equilibrium --- deviations do
+not gain in expectation. The model's mixed strategies also keep ranges from
+ever collapsing to zero on the human's true holding (regret matching leaves
+small probability on many actions), and every nested re-solve refreshes the
+range model. The honest catch is the next box.
+
 \begin{trap}
-\textbf{Where the soundness leak is.} Step 2 \emph{assumes} opponents played
-the blueprint so far. In two-player zero-sum, this ``unsafe'' re-solving can
-in principle be punished by an opponent who deviates earlier on purpose to
-poison your beliefs; Libratus closed exactly this hole with \emph{safe}
-re-solving gadgets that guarantee the re-solved strategy never does worse
-than the blueprint against any hand. Pluribus --- playing six-max, where
-equilibrium guarantees were abandoned anyway (Sec.\ 2.1) --- accepts the
-heuristic. One more instance of the multiplayer trade: theory exchanged for
-scale, validated empirically.
+\textbf{Where the soundness leak is.} An opponent can deviate \emph{early},
+accept a small on-model loss, \emph{poison the assumed range}, and harvest a
+larger error from the re-solver later --- this is exactly what makes naive
+(``unsafe'') re-solving theoretically attackable in two-player zero-sum.
+Libratus closed the hole with \emph{safe} re-solving gadgets that guarantee
+the re-solved strategy never does worse than the blueprint against any
+opponent hand. Pluribus --- playing six-max, where equilibrium guarantees
+were abandoned anyway (Sec.\ 2.1) --- accepts the heuristic; empirically,
+five elite professionals over 10\,000 hands did not find a way in. One more
+instance of the multiplayer trade: theory exchanged for scale, validated at
+the table.
 \end{trap}
 
 \textbf{Results.} Against elite professionals (including World Series
