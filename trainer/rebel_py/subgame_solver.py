@@ -1,0 +1,143 @@
+"""Vectorized CFR-D over a public subgame tree (Phase 1: no value net).
+
+Faithful port of the reference `CFR` in
+``trainer/rebel/rebel/csrc/liars_dice/subgame_solving.cc`` (alternating
+traverser, cumulative-regret matching, reach-weighted average strategy,
+Linear-CFR / DCFR discounts, ``root_values_means`` as the value-net target),
+but vectorized over the 1326 hands: every per-node quantity is an
+``(n_hands, n_children)`` or ``(n_hands,)`` array.
+
+Per node we keep (decision nodes only): cumulative regret, the current strategy
+(regret matching), and the reach-weighted cumulative strategy (→ average).
+Per CFR step for a traverser we: compute both players' reaches under the current
+strategy, set leaf values from the terminal closures (opponent-reach weighted),
+back values up the tree accumulating regret at traverser nodes, then regret-match
+and accumulate the average. `get_hand_values(p)` returns the running-mean root
+counterfactual values — the training target for the value net.
+"""
+from __future__ import annotations
+
+import numpy as np
+
+from .public_tree import Subgame
+
+_EPS = 1e-80
+
+
+class CfrSolver:
+    def __init__(self, subgame: Subgame, beliefs: tuple[np.ndarray, np.ndarray],
+                 *, num_iters: int = 1000, linear: bool = True):
+        self.sg = subgame
+        self.nodes = subgame.nodes
+        self.H = subgame.n_hands
+        self.beliefs = (np.asarray(beliefs[0], dtype=np.float64),
+                        np.asarray(beliefs[1], dtype=np.float64))
+        self.num_iters = num_iters
+        self.linear = linear
+
+        # parent[node], slot[node] = index of `node` within parent.children.
+        n = len(self.nodes)
+        self.parent = np.full(n, -1, dtype=np.int64)
+        self.slot = np.full(n, -1, dtype=np.int64)
+        for nid, node in enumerate(self.nodes):
+            for k, c in enumerate(node.children):
+                self.parent[c] = nid
+                self.slot[c] = k
+
+        # Per-decision-node arrays (None for terminals).
+        self.regret: list[np.ndarray | None] = [None] * n
+        self.cur: list[np.ndarray | None] = [None] * n        # current strategy
+        self.sumstrat: list[np.ndarray | None] = [None] * n   # reach-weighted cum
+        self.avg: list[np.ndarray | None] = [None] * n        # average strategy
+        for nid, node in enumerate(self.nodes):
+            if not node.is_terminal:
+                a = len(node.children)
+                self.regret[nid] = np.zeros((self.H, a))
+                self.cur[nid] = np.full((self.H, a), 1.0 / a)
+                self.sumstrat[nid] = np.zeros((self.H, a))
+                self.avg[nid] = np.full((self.H, a), 1.0 / a)
+
+        self.reach = [np.zeros((n, self.H)), np.zeros((n, self.H))]
+        self.values = np.zeros((n, self.H))
+        self.root_mean = [np.zeros(self.H), np.zeros(self.H)]
+        self.steps = [0, 0]
+
+    # ─── reach (top-down) under a given per-node strategy ────────────────────
+    def _compute_reach(self, player: int, strat: list, out: np.ndarray) -> None:
+        out[0] = self.beliefs[player]
+        for nid in range(1, len(self.nodes)):
+            par = int(self.parent[nid])
+            if self.nodes[par].player == player:
+                out[nid] = out[par] * strat[par][:, int(self.slot[nid])]
+            else:
+                out[nid] = out[par]
+
+    # ─── one alternating CFR step for `traverser` ────────────────────────────
+    def step(self, traverser: int) -> None:
+        opp = 1 - traverser
+        self._compute_reach(0, self.cur, self.reach[0])
+        self._compute_reach(1, self.cur, self.reach[1])
+
+        # leaf values (opponent-reach weighted), then back up.
+        for nid in range(len(self.nodes) - 1, -1, -1):
+            node = self.nodes[nid]
+            if node.is_terminal:
+                self.values[nid] = node.term_value(traverser, self.reach[opp][nid])
+                continue
+            if node.player == traverser:
+                v = np.zeros(self.H)
+                reg = self.regret[nid]
+                cur = self.cur[nid]
+                for k, c in enumerate(node.children):
+                    av = self.values[c]
+                    reg[:, k] += av
+                    v += av * cur[:, k]
+                reg -= v[:, None]
+                self.values[nid] = v
+            else:
+                v = np.zeros(self.H)
+                for c in node.children:
+                    v += self.values[c]
+                self.values[nid] = v
+
+        # root running-mean value (the training target).
+        rv = self.values[0]
+        alpha = 2.0 / (self.steps[traverser] + 2) if self.linear \
+            else 1.0 / (self.steps[traverser] + 1)
+        self.root_mean[traverser] += (rv - self.root_mean[traverser]) * alpha
+
+        num = self.steps[traverser] + 1
+        disc = num / (num + 1.0) if self.linear else 1.0
+
+        # regret matching at the traverser's nodes → new current strategy.
+        for nid, node in enumerate(self.nodes):
+            if node.is_terminal or node.player != traverser:
+                continue
+            pos = np.maximum(self.regret[nid], _EPS)
+            self.cur[nid] = pos / pos.sum(axis=1, keepdims=True)
+
+        # reach (traverser) under the NEW strategy → reach-weight the average.
+        self._compute_reach(traverser, self.cur, self.reach[traverser])
+        for nid, node in enumerate(self.nodes):
+            if node.is_terminal or node.player != traverser:
+                continue
+            if self.linear:
+                self.regret[nid] *= disc
+                self.sumstrat[nid] *= disc
+            self.sumstrat[nid] += self.reach[traverser][nid][:, None] * self.cur[nid]
+            s = self.sumstrat[nid].sum(axis=1, keepdims=True)
+            a = self.cur[nid].shape[1]
+            safe = np.where(s > 0, s, 1.0)
+            self.avg[nid] = np.where(s > 0, self.sumstrat[nid] / safe, 1.0 / a)
+
+        self.steps[traverser] += 1
+
+    def multistep(self) -> None:
+        for it in range(self.num_iters):
+            self.step(it % 2)
+
+    def get_hand_values(self, player: int) -> np.ndarray:
+        return self.root_mean[player]
+
+    def average_strategy(self) -> list:
+        return self.avg

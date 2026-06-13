@@ -7,6 +7,9 @@ trainer/build/
 trainer/*.egg-info/
 trainer/runs/
 trainer/__pycache__/
+
+# Cloned Facebook ReBeL reference repo (algorithmic reference only, not ours).
+trainer/rebel/
 **/__pycache__/
 *.pyc
 *.pyo
