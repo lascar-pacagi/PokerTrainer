@@ -82,6 +82,12 @@ typedef _EnvStepC     = ffi.Int32 Function(
 typedef _EnvStepD     = int Function(
     ffi.Pointer<ffi.Void>, int, ffi.Pointer<ffi.Double>);
 
+// Raise to an explicit chip target (note: int64 bet-to arg, not int32).
+typedef _EnvStepRaiseToC = ffi.Int32 Function(
+    ffi.Pointer<ffi.Void>, ffi.Int64, ffi.Pointer<ffi.Double>);
+typedef _EnvStepRaiseToD = int Function(
+    ffi.Pointer<ffi.Void>, int, ffi.Pointer<ffi.Double>);
+
 typedef _EnvPayoffsC  = ffi.Void Function(
     ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Double>, ffi.Pointer<ffi.Double>);
 typedef _EnvPayoffsD  = void Function(
@@ -215,6 +221,8 @@ final class PokerNative {
       ffi.Pointer<ffi.Double>) ptEnvStep;
   final int Function(ffi.Pointer<ffi.Void>, int,
       ffi.Pointer<ffi.Double>) ptEnvStepAction;
+  final int Function(ffi.Pointer<ffi.Void>, int,
+      ffi.Pointer<ffi.Double>) ptEnvStepRaiseTo;
   final void Function(ffi.Pointer<ffi.Void>, ffi.Pointer<ffi.Double>,
       ffi.Pointer<ffi.Double>) ptEnvPayoffsBb;
 
@@ -264,6 +272,7 @@ final class PokerNative {
         ptEnvObserve   = lib.lookupFunction<_EnvObserveC, _EnvObserveD>('pt_env_observe'),
         ptEnvStep      = lib.lookupFunction<_EnvStepC, _EnvStepD>('pt_env_step'),
         ptEnvStepAction = lib.lookupFunction<_EnvStepC, _EnvStepD>('pt_env_step_action'),
+        ptEnvStepRaiseTo = lib.lookupFunction<_EnvStepRaiseToC, _EnvStepRaiseToD>('pt_env_step_raise_to'),
         ptEnvPayoffsBb = lib.lookupFunction<_EnvPayoffsC, _EnvPayoffsD>('pt_env_payoffs_bb'),
         ptEnvStateSnapshot = lib.lookupFunction<_EnvSnapshotC, _EnvSnapshotD>('pt_env_state_snapshot'),
         ptEnvHistoryAt = lib.lookupFunction<_EnvHistoryAtC, _EnvHistoryAtD>('pt_env_history_at'),

@@ -369,6 +369,26 @@ class EnvHandle {
     }
   }
 
+  /// Apply a raise to an explicit chip target (total invested this street by
+  /// the actor after the action). Used to mirror an external agent whose bet
+  /// sizes need not match the discrete RAISE_* abstraction (e.g. Slumbot).
+  /// Returns true iff the hand is terminal after this step. Throws if the
+  /// target is not a legal full raise or exact all-in for the seat-to-act.
+  bool stepRaiseTo(int betToChips) {
+    _checkAlive();
+    final rewardPtr = malloc<ffi.Double>();
+    try {
+      final rc = engine.native.ptEnvStepRaiseTo(_ptr, betToChips, rewardPtr);
+      if (rc < 0) {
+        throw StateError('pt_env_step_raise_to rejected betTo=$betToChips '
+            '(illegal target for the seat to act?)');
+      }
+      return rc == 1;
+    } finally {
+      malloc.free(rewardPtr);
+    }
+  }
+
   // ─── Inspector card setters ────────────────────────────────────────────
 
   /// Wipe all 4 hole + 5 board slots to NO_CARD.

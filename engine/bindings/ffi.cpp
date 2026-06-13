@@ -434,6 +434,25 @@ int32_t pt_env_step_action(void* handle, int32_t action_type, double* out_reward
     }
 }
 
+// Apply a raise to an explicit chip target (total invested this street by the
+// actor after the action). Lets a host mirror an external agent whose bet
+// sizes need not match the discrete RAISE_* abstraction (e.g. Slumbot).
+// Returns 1 if the hand is terminal after the step, 0 otherwise, -1 on a bad
+// handle / terminal env / illegal target.
+int32_t pt_env_step_raise_to(void* handle, int64_t bet_to_chips, double* out_reward_bb) {
+    if (!handle) return -1;
+    auto* b = static_cast<EnvBox*>(handle);
+    if (b->env.is_terminal()) return -1;
+    try {
+        const auto sr = b->env.step_raise_to(bet_to_chips);
+        b->last_obs_valid = false;
+        if (out_reward_bb) *out_reward_bb = sr.reward_bb;
+        return sr.done ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
 namespace {
 
 // Validate that the 4 hole + 5 board card slots have no duplicates. NO_CARD

@@ -116,6 +116,18 @@ public:
     // if action is illegal. On terminal outcomes, fills payoff_chips.
     static void step(HUState& state, ActionType action, const HandEvaluator* eval = nullptr);
 
+    // Apply a raise to an EXPLICIT chip target `bet_to_chips` (total invested
+    // this street by the actor after the action), rather than to one of the
+    // discrete RAISE_* pot-fractions. Needed to mirror an external agent
+    // (e.g. Slumbot) whose bet sizes need not match the discrete abstraction.
+    // `bet_to_chips` must be a full raise (>= min_raise_to_chips()) or an exact
+    // all-in shove (== invested_this_street + stack); throws otherwise.
+    // History records ALL_IN when shoving, else a generic RAISE label — the
+    // exact amount lives in AppliedAction::bet_to_chips. NOT used by training
+    // traversals (those use the discrete action set).
+    static void step_raise_to(HUState& state, int64_t bet_to_chips,
+                              const HandEvaluator* eval = nullptr);
+
     // Utility: return the card on the board that is visible on `street`.
     // PREFLOP -> 0, FLOP -> 3, TURN -> 4, RIVER/SHOWDOWN -> 5.
     static int n_visible_board(Street s);

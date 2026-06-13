@@ -102,7 +102,11 @@ class GameSession extends ChangeNotifier {
   /// behavior. Toggle from the top-bar control.
   bool _autoStep = true;
 
-  GameSession(this.engine) : env = EnvHandle.create(engine) {
+  /// `startingStackChips` defaults to 100 BB (100 chips/BB). The Play screen
+  /// passes 200 BB (20000) for Slumbot matches, whose format is 200 BB.
+  GameSession(this.engine,
+      {int startingStackChips = 100 * TableState.chipsPerBb})
+      : env = EnvHandle.create(engine, startingStackChips: startingStackChips) {
     _refresh();
   }
 
@@ -179,6 +183,57 @@ class GameSession extends ChangeNotifier {
     env.applyLegal(idx);
     _refresh();
     _autoStepIfModel();
+  }
+
+  // ─── controller-driven steps (no auto-step) ─────────────────────────────
+  //
+  // Used by the Play screen's MatchController, which orchestrates seats
+  // itself (local human/bot AND a remote Slumbot seat). These apply a single
+  // action to the mirror env and refresh WITHOUT triggering `_autoStepIfModel`
+  // — the controller decides what happens next.
+
+  /// Apply a discrete action by ActionType (FOLD / CHECK_CALL / RAISE_* /
+  /// ALL_IN), then refresh. No auto-step.
+  void applyActionDirect(ActionType type) {
+    env.applyAction(type);
+    _refresh();
+  }
+
+  /// Apply a raise to an explicit chip target (mirror an external agent's exact
+  /// bet size), then refresh. No auto-step.
+  void applyRaiseToDirect(int betToChips) {
+    env.stepRaiseTo(betToChips);
+    _refresh();
+  }
+
+  // ─── mirror-hand injection (Play screen vs an external authority) ────────
+  //
+  // For a match where an external agent (Slumbot) deals and is authoritative,
+  // the controller resets the env, wipes the locally-dealt cards, and injects
+  // the real cards as they become known. Card-only overwrite of a freshly
+  // reset env is the same safe pattern the inspector uses.
+
+  /// Start a fresh mirror hand: reset the env (internal RNG) and wipe ALL
+  /// hole + board slots to NO_CARD, ready for injection. Bumps the hand count.
+  void beginMirrorHand() {
+    env.reset();
+    env.clearCards();
+    _currentSeed = null;
+    _handCount += 1;
+    _equityKey = null;
+    _refresh();
+  }
+
+  /// Overwrite a seat's hole cards (mirror injection), then refresh.
+  void injectHole(Player p, int c0, int c1) {
+    env.setHole(p, c0, c1);
+    _refresh();
+  }
+
+  /// Overwrite the board (5 slots, NO_CARD = unset), then refresh.
+  void injectBoard(List<int> cards5) {
+    env.setBoard(cards5);
+    _refresh();
   }
 
   // ─── agent assignment ───────────────────────────────────────────────────

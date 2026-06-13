@@ -10,7 +10,15 @@ import '../game/game_session.dart';
 
 class ActionBar extends StatelessWidget {
   final GameSession session;
-  const ActionBar({super.key, required this.session});
+
+  /// Optional override for what happens when a legal action is tapped. The
+  /// Inspector leaves this null (taps go straight to `session.applyLegal`).
+  /// The Play screen passes its `MatchController.humanAct`, which may route
+  /// the action to a remote opponent (Slumbot) before/while applying it to
+  /// the mirror env.
+  final void Function(int legalIdx)? onAction;
+
+  const ActionBar({super.key, required this.session, this.onAction});
 
   @override
   Widget build(BuildContext context) {
@@ -100,7 +108,7 @@ class ActionBar extends StatelessWidget {
                   isArgmax: argmax == i,
                   isFold: obs.legal[i] == ActionType.fold,
                   isAllIn: obs.legal[i] == ActionType.allIn,
-                  onTap: () => session.applyLegal(i),
+                  onTap: () => (onAction ?? session.applyLegal)(i),
                 ),
             ],
           ),

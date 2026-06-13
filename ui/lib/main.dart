@@ -15,6 +15,7 @@ import 'ffi/actions.dart';
 import 'ffi/engine.dart';
 import 'game/game_session.dart';
 import 'game/model_registry.dart';
+import 'play/play_screen.dart';
 import 'training/training_screen.dart';
 import 'widgets/action_bar.dart';
 import 'widgets/history_strip.dart';
@@ -70,7 +71,7 @@ class InspectorHome extends StatefulWidget {
   State<InspectorHome> createState() => _InspectorHomeState();
 }
 
-enum _Tab { inspector, training }
+enum _Tab { inspector, training, play }
 
 class _InspectorHomeState extends State<InspectorHome> {
   late final GameSession  _session;
@@ -114,6 +115,15 @@ class _InspectorHomeState extends State<InspectorHome> {
                         textScaler: const TextScaler.linear(1.32),
                       ),
                       child: const TrainingScreen(),
+                    ),
+                  )
+                else if (_tab == _Tab.play)
+                  Expanded(
+                    child: MediaQuery(
+                      data: MediaQuery.of(context).copyWith(
+                        textScaler: const TextScaler.linear(1.15),
+                      ),
+                      child: PlayScreen(engine: widget.engine, models: _models),
                     ),
                   )
                 else ...[
@@ -187,8 +197,16 @@ class _InspectorHomeState extends State<InspectorHome> {
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: _TabPill(
-              label: t == _Tab.inspector ? 'Inspector' : 'Training',
-              icon: t == _Tab.inspector ? Icons.casino : Icons.school,
+              label: switch (t) {
+                _Tab.inspector => 'Inspector',
+                _Tab.training => 'Training',
+                _Tab.play => 'Play',
+              },
+              icon: switch (t) {
+                _Tab.inspector => Icons.casino,
+                _Tab.training => Icons.school,
+                _Tab.play => Icons.sports_esports,
+              },
               selected: _tab == t,
               onTap: () => setState(() => _tab = t),
             ),

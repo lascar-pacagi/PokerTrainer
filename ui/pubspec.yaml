@@ -44,6 +44,9 @@ dependencies:
   # SHA1 used to fingerprint solver inputs for output-file naming.
   crypto: ^3.0.3
 
+  # HTTP client for the Slumbot API (Play screen, human/bot vs Slumbot).
+  http: ^1.2.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

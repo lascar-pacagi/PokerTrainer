@@ -15,10 +15,24 @@ class TableView extends StatelessWidget {
   /// False = hide the seat that's NOT to act (play-vs-bot feel).
   final bool revealAllHoles;
 
+  /// Optional override for a seat's occupant label (e.g. the Play screen passes
+  /// "You" / "Slumbot" / a model name). Null → fall back to the agent label.
+  final String? Function(Player p)? labelFor;
+
+  /// Optional override for whether a seat is rendered face-down (e.g. the Play
+  /// screen hides Slumbot's unknown cards). Null → the default reveal logic.
+  final bool Function(Player p)? faceDownOf;
+
+  /// Optional transient "last action" caption per seat ("Raise to 6 bb"…).
+  final String? Function(Player p)? bubbleFor;
+
   const TableView({
     super.key,
     required this.session,
     this.revealAllHoles = true,
+    this.labelFor,
+    this.faceDownOf,
+    this.bubbleFor,
   });
 
   @override
@@ -31,12 +45,14 @@ class TableView extends StatelessWidget {
     final summary = session.terminalSummary();
 
     Widget seat(Player p, List<int> hole) {
-      // Hide-cards rule (when not in reveal-all): hide the seat that is
-      // currently NOT to act. On terminal we always show both.
-      final hide = !revealAllHoles &&
-          !table.isTerminal &&
-          table.toAct != null &&
-          p != table.toAct;
+      // Face-down: a caller override wins (Play hides Slumbot's unknown cards);
+      // otherwise, when not revealing all, hide the seat that is NOT to act.
+      final hide = faceDownOf != null
+          ? faceDownOf!(p)
+          : (!revealAllHoles &&
+              !table.isTerminal &&
+              table.toAct != null &&
+              p != table.toAct);
       double? eq;
       if (equity != null && !hide) {
         eq = p == Player.sb ? equity.sbEquity() : equity.bbEquity();
@@ -47,8 +63,9 @@ class TableView extends StatelessWidget {
         holeCards: hole,
         isToAct: !table.isTerminal && table.toAct == p,
         faceDown: hide,
-        agentLabel: _agentLabel(session.agentFor(p)),
+        agentLabel: labelFor != null ? labelFor!(p) : _agentLabel(session.agentFor(p)),
         equityFraction: eq,
+        actionBubble: bubbleFor != null ? bubbleFor!(p) : null,
       );
     }
 

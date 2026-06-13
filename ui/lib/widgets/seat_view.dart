@@ -17,6 +17,9 @@ class SeatView extends StatelessWidget {
   final String? agentLabel;            // e.g. "Human" / "Model: cpu_long_50k"
   /// Equity for this seat (win + 0.5*tie). Null when unknown.
   final double? equityFraction;
+  /// Transient "last action" caption shown as a pill above the seat
+  /// ("Raise to 6 bb", "Check", "Call", "Fold"…), poker-client style.
+  final String? actionBubble;
 
   const SeatView({
     super.key,
@@ -27,6 +30,7 @@ class SeatView extends StatelessWidget {
     this.faceDown = false,
     this.agentLabel,
     this.equityFraction,
+    this.actionBubble,
   });
 
   @override
@@ -38,7 +42,38 @@ class SeatView extends StatelessWidget {
         ? const Color(0xFFFFD24A)
         : const Color(0x00000000);
 
-    return AnimatedContainer(
+    // Action bubble to the RIGHT of the seat (more room for "Raise to 6 bb",
+    // no vertical shift). Fixed-width slot so the table doesn't jump.
+    final bubble = SizedBox(
+      width: 150,
+      child: actionBubble == null
+          ? null
+          : Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: const Color(0xF2202830),
+                    borderRadius: BorderRadius.circular(13),
+                    border: Border.all(color: const Color(0xFFFFD24A), width: 1.5),
+                  ),
+                  child: Text(
+                    actionBubble!,
+                    style: const TextStyle(
+                      color: Color(0xFFFFE8A8),
+                      fontWeight: FontWeight.w800,
+                      fontSize: 14,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+    );
+
+    final box = AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -127,6 +162,12 @@ class SeatView extends StatelessWidget {
           ),
         ],
       ),
+    );
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [box, bubble],
     );
   }
 

@@ -68,6 +68,12 @@ public:
     // Apply by ActionType (bypasses reliance on a cached observation).
     StepResult step_action(ActionType a);
 
+    // Apply a raise to an explicit chip target (total invested this street by
+    // the actor after the action). Used to mirror an external agent whose bet
+    // sizes need not match the discrete RAISE_* abstraction (e.g. Slumbot).
+    // Throws if the target is not a legal full raise or exact all-in.
+    StepResult step_raise_to(int64_t bet_to_chips);
+
     const HUState& state() const { return state_; }
 
     // Mutable view of the underlying HUState, intended for synthetic spot

@@ -73,6 +73,25 @@ Env::StepResult Env::step_action(ActionType a) {
     return out;
 }
 
+Env::StepResult Env::step_raise_to(int64_t bet_to_chips) {
+    if (state_.is_terminal())
+        throw std::runtime_error("step on terminal state");
+    const Player actor = state_.to_act;
+    HUGame::step_raise_to(state_, bet_to_chips, impl_->evaluator.get());
+
+    StepResult out{};
+    out.just_acted = actor;
+    out.done       = state_.is_terminal();
+    if (out.done) {
+        const int ai = static_cast<int>(actor);
+        out.reward_bb = static_cast<double>(state_.payoff_chips[ai]) /
+                        static_cast<double>(HUState::BIG_BLIND_CHIPS);
+    } else {
+        out.reward_bb = 0.0;
+    }
+    return out;
+}
+
 Env::StepResult Env::step(int legal_action_idx) {
     const auto legal = state_.legal_actions();
     if (legal_action_idx < 0 || legal_action_idx >= static_cast<int>(legal.size()))

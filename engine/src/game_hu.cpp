@@ -341,6 +341,59 @@ void HUGame::step(HUState& s, ActionType action, const HandEvaluator* eval) {
     maybe_close_street(s, eval);
 }
 
+void HUGame::step_raise_to(HUState& s, int64_t bet_to, const HandEvaluator* eval) {
+    if (s.is_terminal()) throw std::runtime_error("step_raise_to on terminal state");
+
+    const int pi = static_cast<int>(s.to_act);
+    const int64_t me_inv    = s.invested_this_street[pi];
+    const int64_t my_stack  = s.stacks[pi];
+    const int64_t all_in_to = me_inv + my_stack;
+    const int64_t to_call   = s.to_call_chips();
+
+    // Must have chips behind beyond the call to raise at all.
+    if (my_stack <= to_call)
+        throw std::runtime_error("step_raise_to: no chips behind to raise");
+
+    // Target must be a full raise (>= min-raise-to) or an exact all-in shove.
+    const int64_t min_rt   = s.min_raise_to_chips();
+    const bool    is_shove = (bet_to == all_in_to);
+    if (!is_shove && (bet_to < min_rt || bet_to > all_in_to))
+        throw std::runtime_error("step_raise_to: illegal raise target");
+
+    AppliedAction rec{};
+    rec.actor  = s.to_act;
+    rec.street = s.street;
+    // Label only — the exact size is carried in bet_to_chips below. There is
+    // no "generic raise" ActionType, so non-shove arbitrary raises borrow the
+    // RAISE_100 slot for display/history; the UI renders the chip amount.
+    rec.type   = is_shove ? ActionType::ALL_IN : ActionType::RAISE_100;
+
+    const int64_t add = bet_to - me_inv;
+    if (add <= 0 || add > my_stack)
+        throw std::runtime_error("step_raise_to: bad add amount");
+
+    const int64_t prev_bet   = s.current_bet_chips();
+    const int64_t raise_incr = bet_to - prev_bet;
+    if (raise_incr >= std::max<int64_t>(s.last_raise_size, HUState::BIG_BLIND_CHIPS)) {
+        // Full-size raise updates the min-raise baseline; short all-in does not.
+        s.last_raise_size = raise_incr;
+    }
+    s.stacks[pi] -= add;
+    s.invested_this_street[pi] = bet_to;
+    s.pot_chips += add;
+    if (s.stacks[pi] == 0) s.all_in[pi] = true;
+    rec.bet_to_chips = bet_to;
+
+    // Shared tail — mirrors HUGame::step's post-action bookkeeping exactly.
+    rec.pot_after_chips   = s.pot_chips;
+    rec.stack_after_chips = s.stacks[pi];
+    rec.was_all_in        = s.all_in[pi];
+    s.history.push_back(rec);
+    s.actions_this_street += 1;
+    s.to_act = other(s.to_act);
+    maybe_close_street(s, eval);
+}
+
 void HUGame::resolve_showdown(HUState& s, const HandEvaluator& eval) {
     const std::array<Card, 7> h0 = {s.hole[0][0], s.hole[0][1],
                                     s.board[0], s.board[1], s.board[2], s.board[3], s.board[4]};
