@@ -17,16 +17,25 @@ counterfactual values — the training target for the value net.
 """
 from __future__ import annotations
 
+from typing import Callable, Optional
+
 import numpy as np
 
 from .public_tree import Subgame
+from .pbs import encode_query, query_dim
+from .hand_index import board_free_mask
 
 _EPS = 1e-80
+
+# A value function maps a (N, query_dim) batch of PBS queries to (N, NUM_HANDS)
+# per-hand values for the traverser, assuming normalized opponent beliefs.
+ValueFn = Callable[[np.ndarray], np.ndarray]
 
 
 class CfrSolver:
     def __init__(self, subgame: Subgame, beliefs: tuple[np.ndarray, np.ndarray],
-                 *, num_iters: int = 1000, linear: bool = True):
+                 *, num_iters: int = 1000, linear: bool = True,
+                 value_fn: Optional[ValueFn] = None):
         self.sg = subgame
         self.nodes = subgame.nodes
         self.H = subgame.n_hands
@@ -34,6 +43,17 @@ class CfrSolver:
                         np.asarray(beliefs[1], dtype=np.float64))
         self.num_iters = num_iters
         self.linear = linear
+        self.value_fn = value_fn
+
+        # Depth-limit value-net leaves: queried each step for the current
+        # traverser, scaled by the opponent's reach mass at the leaf.
+        self.net_leaves = [nid for nid, nd in enumerate(self.nodes)
+                           if nd.is_net_leaf]
+        if self.net_leaves and value_fn is None:
+            raise ValueError("subgame has value-net leaves but no value_fn given")
+        self._qdim = query_dim()
+        self._valid = (board_free_mask(subgame.board).astype(np.float64)
+                       if subgame.board else np.ones(self.H))
 
         # parent[node], slot[node] = index of `node` within parent.children.
         n = len(self.nodes)
@@ -50,7 +70,7 @@ class CfrSolver:
         self.sumstrat: list[np.ndarray | None] = [None] * n   # reach-weighted cum
         self.avg: list[np.ndarray | None] = [None] * n        # average strategy
         for nid, node in enumerate(self.nodes):
-            if not node.is_terminal:
+            if not node.is_terminal and not node.is_net_leaf:
                 a = len(node.children)
                 self.regret[nid] = np.zeros((self.H, a))
                 self.cur[nid] = np.full((self.H, a), 1.0 / a)
@@ -72,11 +92,27 @@ class CfrSolver:
             else:
                 out[nid] = out[par]
 
+    # ─── value-net leaves (batched query, opp-reach-mass scaled) ─────────────
+    def _compute_net_leaf_values(self, traverser: int) -> None:
+        opp = 1 - traverser
+        N = len(self.net_leaves)
+        queries = np.empty((N, self._qdim))
+        for row, nid in enumerate(self.net_leaves):
+            ps = self.nodes[nid].public_state
+            queries[row] = encode_query(traverser, ps,
+                                        self.reach[0][nid], self.reach[1][nid])
+        vals = np.asarray(self.value_fn(queries), dtype=np.float64)  # (N, H), normalized
+        for row, nid in enumerate(self.net_leaves):
+            mass = float(self.reach[opp][nid].sum())
+            self.values[nid] = vals[row] * self._valid * mass
+
     # ─── one alternating CFR step for `traverser` ────────────────────────────
     def step(self, traverser: int) -> None:
         opp = 1 - traverser
         self._compute_reach(0, self.cur, self.reach[0])
         self._compute_reach(1, self.cur, self.reach[1])
+        if self.net_leaves:
+            self._compute_net_leaf_values(traverser)
 
         # leaf values (opponent-reach weighted), then back up.
         for nid in range(len(self.nodes) - 1, -1, -1):
@@ -84,6 +120,8 @@ class CfrSolver:
             if node.is_terminal:
                 self.values[nid] = node.term_value(traverser, self.reach[opp][nid])
                 continue
+            if node.is_net_leaf:
+                continue  # value already set by _compute_net_leaf_values
             if node.player == traverser:
                 v = np.zeros(self.H)
                 reg = self.regret[nid]
@@ -111,7 +149,7 @@ class CfrSolver:
 
         # regret matching at the traverser's nodes → new current strategy.
         for nid, node in enumerate(self.nodes):
-            if node.is_terminal or node.player != traverser:
+            if node.is_terminal or node.is_net_leaf or node.player != traverser:
                 continue
             pos = np.maximum(self.regret[nid], _EPS)
             self.cur[nid] = pos / pos.sum(axis=1, keepdims=True)
@@ -119,7 +157,7 @@ class CfrSolver:
         # reach (traverser) under the NEW strategy → reach-weight the average.
         self._compute_reach(traverser, self.cur, self.reach[traverser])
         for nid, node in enumerate(self.nodes):
-            if node.is_terminal or node.player != traverser:
+            if node.is_terminal or node.is_net_leaf or node.player != traverser:
                 continue
             if self.linear:
                 self.regret[nid] *= disc
@@ -141,3 +179,9 @@ class CfrSolver:
 
     def average_strategy(self) -> list:
         return self.avg
+
+    def current_strategy(self) -> list:
+        """The last (current-iterate) strategy — used to sample the next public
+        state and to propagate beliefs during self-play (reference:
+        `get_sampling_strategy` / `get_belief_propogation_strategy`)."""
+        return self.cur

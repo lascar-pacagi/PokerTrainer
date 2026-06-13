@@ -5,6 +5,7 @@ Run:
 """
 from __future__ import annotations
 
+import rebel_py  # noqa: F401  (pins BLAS threads before numpy loads)
 import numpy as np
 
 from rebel_py.hand_index import (NUM_HANDS, HAND_CARDS, hand_index, CONFLICT,
