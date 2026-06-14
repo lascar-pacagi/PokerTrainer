@@ -402,6 +402,11 @@ class MatchController extends ChangeNotifier {
       _lastWinnings = resp.winnings;
       _netChipsLocal += resp.winnings ?? 0;
       _handStarted = false;
+    } else if (session.tableState.toAct == _localSeat) {
+      // Action is back to us in the SAME round: our own label (from earlier this
+      // round) is now stale — drop it so the seat is clean for the new decision.
+      // The opponent's bubble stays so we still see what we are responding to.
+      _bubbles[_localSeat] = null;
     }
   }
 
