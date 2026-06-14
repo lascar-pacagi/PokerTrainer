@@ -1,4 +1,6 @@
 """ReBeL value network (and a numpy adapter the solver queries).
+ReBeL idea → V(PBS), the AlphaZero-style value net that prices subgame leaves;
+NetValueFn is the numpy bridge the solver calls · doc §5.
 
 Faithful to ``trainer/rebel/rebel/cfvpy/models.py`` (``Net2``): a GELU MLP whose
 output layer is scaled by 0.01 at init so the net's initial predictions are near

@@ -1,4 +1,6 @@
 """Public Belief State (PBS) and its value-net query encoding.
+ReBeL idea → the conversion trick: the PBS is the "state", and encode_query is
+what the value net sees · doc §2.
 
 A PBS = (public state, both players' beliefs). The *public state* is everything
 both players can observe — board, street, pot, who is to act, the amount to

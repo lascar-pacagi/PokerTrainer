@@ -1,4 +1,5 @@
 """The 1326 hole-card combos: enumeration, indexing, and card-removal masks.
+ReBeL idea → the range everything is vectorized over · doc §1, §3.
 
 A "hand" in poker ReBeL is a specific 2-card combo (not the 169 strategic
 classes — that abstraction is for the push/fold oracle). There are C(52,2)=1326

@@ -1,4 +1,6 @@
 """Recursive self-play (the ReBeL outer loop) + the recursive strategy.
+ReBeL idea → the self-play episode (the six steps); RlRunner.step is the loop,
+the act_iter split is the "play a random CFR iterate" safety trick · doc §6.
 
 Mirrors ``RlRunner`` / ``compute_strategy_recursive`` in the reference
 ``recursive_solving.cc``.

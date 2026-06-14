@@ -1,4 +1,6 @@
 """Vectorized CFR-D over a public subgame tree (Phase 1: no value net).
+ReBeL idea → "solve it with CFR; leaves co-evolve". The leaf-value scaling trick
+(net output × opponent reach mass) lives in _compute_net_leaf_values · doc §4.
 
 Faithful port of the reference `CFR` in
 ``trainer/rebel/rebel/csrc/liars_dice/subgame_solving.cc`` (alternating

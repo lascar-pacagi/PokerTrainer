@@ -1,4 +1,5 @@
 """Phase-1 ground-truth validation of the CFR-D solver (no value net).
+ReBeL idea → the hard correctness gates each layer must pass · doc §10.
 
 (a) Several river subgames: solve, assert exploitability → ~0 (the rigorous,
     exact correctness proof on the full 1326-combo space).

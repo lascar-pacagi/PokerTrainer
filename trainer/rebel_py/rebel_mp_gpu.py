@@ -1,4 +1,6 @@
 """Multi-process ReBeL trainer: CPU actor pool + GPU learner.
+ReBeL idea → scaling self-play to a cluster node (the test-time loop is the same
+machinery minus the buffer writes) · doc §9.
 
 Mirrors ``trainer/cfr/cfr_mp_gpu.py`` (read its header for the rationale of the
 forkserver + shared-memory-net + copy_-sync design). The ReBeL-specific shape:

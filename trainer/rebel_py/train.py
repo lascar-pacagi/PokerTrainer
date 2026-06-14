@@ -1,4 +1,5 @@
 """Single-process ReBeL training (Phase 2a).
+ReBeL idea → the outer training loop (self-play → regress V → gate) · doc §7.
 
 The loop, per the paper:
   1. self-play: ``RlRunner`` plays games over depth-limited subgames (leaves

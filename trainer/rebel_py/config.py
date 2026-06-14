@@ -1,4 +1,6 @@
-"""ReBeL training configuration (Phase 2a: river, betting-depth limit)."""
+"""ReBeL training configuration (Phase 2a: river, betting-depth limit).
+ReBeL idea → the knobs of the training loop (cfr_iters sets the value-target
+accuracy; see the bias note on the field) · doc §7."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field

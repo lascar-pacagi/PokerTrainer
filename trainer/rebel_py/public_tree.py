@@ -1,4 +1,6 @@
 """Public game tree for a depth-limited subgame + terminal value functions.
+ReBeL idea → "build the depth-limited subgame (shape only)" + the river chance
+node; subtree_subgame is how the recursion re-roots at each public state · doc §3.
 
 A node is a *public* state (betting sequence) — it does not depend on the hole
 cards, since betting legality/pot/stacks are hole-independent. Each decision

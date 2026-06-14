@@ -1,4 +1,6 @@
 """Per-hand terminal values at the leaves of a public subgame.
+ReBeL idea → leaf payoffs; the rank/incidence primitives that scaled the river
+chance node (RiverShowdown, FoldRemoval) · doc §8.
 
 A leaf value is, for each of the 1326 hero hands h, the expected payoff against
 the opponent's *reach* over their 1326 hands (card-removal masked). In CFR the

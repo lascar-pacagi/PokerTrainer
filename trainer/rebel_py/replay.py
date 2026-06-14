@@ -1,4 +1,5 @@
 """Reservoir replay buffer for ReBeL value-net training examples.
+ReBeL idea → the value buffer self-play fills and the learner regresses on · doc §7.
 
 Each example is a ``(query, value)`` pair: ``query`` is the PBS encoding
 (``pbs.encode_query``, dim ``query_dim``) and ``value`` is the per-hand
