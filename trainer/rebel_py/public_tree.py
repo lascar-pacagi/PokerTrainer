@@ -82,20 +82,24 @@ def make_showdown_value(sign_matrix: np.ndarray, stake_bb: float):
     return fn
 
 
-def make_chance_showdown_value(summed_sign: np.ndarray, stake_bb: float,
-                               divisor: float):
-    """All-in-on-the-turn runout, collapsed to one terminal.
+def make_river_showdown_value(rs: "sd.RiverShowdown", stake_bb: float):
+    """River showdown via the rank-vector cumsum primitive (no dense matrix)."""
+    def fn(traverser: int, opp_reach: np.ndarray) -> np.ndarray:
+        return rs.values(opp_reach, stake_bb)
+    return fn
 
-    Both players are all-in, so the river is pure chance and then showdown. The
-    chance-averaged value is (stake/divisor) · Σ_r sign_r · opp_reach, and since
-    Σ_r(sign_r @ x) = (Σ_r sign_r) @ x, a single matvec against the summed
-    'turn-equity' matrix replaces 48 per-card showdown matvecs. Each sign_r has
-    the dealt card's removal already baked in, so no per-card reach mask is
-    needed (it is redundant with the zeroed columns of sign_r)."""
+
+def make_chance_showdown_value(rs_list: list, stake_bb: float, divisor: float):
+    """All-in-on-the-turn runout, collapsed to one terminal: the chance-averaged
+    showdown (stake/divisor)·Σ_r showdown_r(opp_reach). Each per-card showdown is
+    the rank-vector cumsum (card removal baked in), so no dense matrices."""
     scale = stake_bb / divisor
 
     def fn(traverser: int, opp_reach: np.ndarray) -> np.ndarray:
-        return scale * (summed_sign @ opp_reach)
+        acc = rs_list[0].values(opp_reach, 1.0)
+        for rs in rs_list[1:]:
+            acc = acc + rs.values(opp_reach, 1.0)
+        return scale * acc
     return fn
 
 
@@ -247,16 +251,15 @@ def build_turn_subgame(seed: int = 7,
     if river_cards is None:
         river_cards = [c for c in range(52) if c not in turn_board]
     divisor = float(52 - len(turn_board) - 4)  # 44 = unseen − hero(2) − opp(2)
-    # Per-river-card showdown matrix (float32: fast matvec, 48× ≈ 0.3 GB) and the
-    # summed "turn-equity" matrix for collapsed all-in runouts.
-    sign_by_card: dict[int, np.ndarray] = {}
-    summed_sign = np.zeros((NUM_HANDS, NUM_HANDS), dtype=np.float32)
+    # Per-river-card showdown via the rank-vector cumsum primitive: ~0.1 MB and
+    # ~0.13 ms each, vs a 7 MB dense matrix and 2.9 ms matvec. 48 of these are
+    # ~5 MB total (was ~0.3 GB) — the difference between fitting many turn actors
+    # on a node and the OOM killer taking them.
+    rs_by_card: dict[int, "sd.RiverShowdown"] = {}
     for r in river_cards:
-        board5 = turn_board + [r]
-        ranks, valid = sd.hand_ranks(board5)
-        sm = sd.showdown_sign_matrix(ranks, valid, board5).astype(np.float32)
-        sign_by_card[r] = sm
-        summed_sign += sm
+        ranks, valid = sd.hand_ranks(turn_board + [r])
+        rs_by_card[r] = sd.RiverShowdown(ranks, valid)
+    rs_list = [rs_by_card[r] for r in river_cards]
 
     nodes: list[Node] = []
 
@@ -264,7 +267,7 @@ def build_turn_subgame(seed: int = 7,
         legal = [int(a) for a in env.observation().legal]
         return [a for a in legal if a in allowed_actions]
 
-    def add_river(env, board5, sign_r) -> int:
+    def add_river(env, board5, rs) -> int:
         nid = len(nodes)
         nodes.append(Node(player=-1))
         node = nodes[nid]
@@ -276,13 +279,13 @@ def build_turn_subgame(seed: int = 7,
             if int(stt.terminal) == 1:  # fold
                 node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), board5)
             else:  # showdown
-                node.term_value = make_showdown_value(sign_r, matched_bb)
+                node.term_value = make_river_showdown_value(rs, matched_bb)
             return nid
         node.player = int(env.to_act())
         node.public_state = _public_state_of(env, board5)  # river PBS (5-card board)
         for a in _legal(env):
             child = env.clone(); child.step_action(pte.ActionType(a))
-            node.children.append(add_river(child, board5, sign_r))
+            node.children.append(add_river(child, board5, rs))
             node.actions.append(a)
         return nid
 
@@ -297,14 +300,14 @@ def build_turn_subgame(seed: int = 7,
             matched_bb = min(c0, c1) / CHIPS_PER_BB
             nodes.append(Node(player=-1, is_terminal=True,
                               term_value=make_chance_showdown_value(
-                                  summed_sign, matched_bb, divisor)))
+                                  rs_list, matched_bb, divisor)))
             return nid
         # River betting remains: a real chance node with one subtree per card.
         nodes.append(Node(player=-1, is_chance=True))
         node = nodes[nid]
         for r in river_cards:
             board5 = turn_board + [r]
-            sub = add_river(river_env.clone(), board5, sign_by_card[r])
+            sub = add_river(river_env.clone(), board5, rs_by_card[r])
             node.children.append(sub)
             node.chance_cards.append(r)
         return nid

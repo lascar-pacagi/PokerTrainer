@@ -66,6 +66,88 @@ def showdown_values(sign_matrix: np.ndarray, opp_reach: np.ndarray,
     return stake * (sign_matrix @ opp_reach)
 
 
+class RiverShowdown:
+    """Card-removal-correct river showdown WITHOUT a dense (H, H) sign matrix.
+
+        v[h] = stake · Σ_{h' valid, h'∩h=∅} oppr[h'] · sign(rank_h' − rank_h)
+             = stake · (WIN[h] − LOSE[h])
+
+    where WIN/LOSE are split by inclusion-exclusion over h's two cards:
+
+        WIN[h]  = (weaker mass, all hands) − (weaker mass sharing c0)
+                                          − (weaker mass sharing c1)
+
+    (no "shares both cards" term: the only hand with both of h's cards is h
+    itself, which is never an opponent nor strictly weaker than itself). Every
+    term is a gather into a rank-sorted cumulative sum, so a 1326² dense matvec
+    becomes a few O(H) cumsums — and 48 of these (one per river card) cost a few
+    rank vectors instead of 48 × 14 MB dense matrices. Matches
+    ``showdown_sign_matrix @ opp_reach`` exactly.
+    """
+
+    def __init__(self, ranks: np.ndarray, valid: np.ndarray):
+        H = NUM_HANDS
+        r = np.asarray(ranks, dtype=np.int64)
+        self.valid = np.asarray(valid, dtype=np.float64)
+        self.c0 = HAND_CARDS[:, 0].astype(np.int64)
+        self.c1 = HAND_CARDS[:, 1].astype(np.int64)
+
+        # global rank order (ascending = strongest first)
+        self.order = np.argsort(r, kind="stable")
+        rs = r[self.order]
+        self.lo_all = np.searchsorted(rs, r, side="left")   # #hands rank < r[h]
+        self.hi_all = np.searchsorted(rs, r, side="right")  # #hands rank ≤ r[h]
+
+        # per-card rank-sorted hand lists (only valid hands)
+        from .hand_index import NUM_CARDS
+        lists: list[list[int]] = [[] for _ in range(NUM_CARDS)]
+        for h in np.flatnonzero(self.valid):
+            lists[self.c0[h]].append(int(h)); lists[self.c1[h]].append(int(h))
+        M = max((len(x) for x in lists), default=0)
+        self.M = M
+        self.card_hands = np.zeros((NUM_CARDS, M), dtype=np.int64)
+        self.card_mask = np.zeros((NUM_CARDS, M), dtype=np.float64)
+        card_ranks = np.full((NUM_CARDS, M), np.iinfo(np.int64).max, dtype=np.int64)
+        for c in range(NUM_CARDS):
+            hs = sorted(lists[c], key=lambda h: r[h])
+            n = len(hs)
+            if n:
+                self.card_hands[c, :n] = hs
+                self.card_mask[c, :n] = 1.0
+                card_ranks[c, :n] = r[hs]
+        # per-hand position within each of its two cards' sorted lists
+        self.lo_c0 = np.zeros(H, dtype=np.int64); self.hi_c0 = np.zeros(H, dtype=np.int64)
+        self.lo_c1 = np.zeros(H, dtype=np.int64); self.hi_c1 = np.zeros(H, dtype=np.int64)
+        for h in np.flatnonzero(self.valid):
+            cr0 = card_ranks[self.c0[h]]; cr1 = card_ranks[self.c1[h]]
+            self.lo_c0[h] = np.searchsorted(cr0, r[h], side="left")
+            self.hi_c0[h] = np.searchsorted(cr0, r[h], side="right")
+            self.lo_c1[h] = np.searchsorted(cr1, r[h], side="left")
+            self.hi_c1[h] = np.searchsorted(cr1, r[h], side="right")
+
+    def values(self, opp_reach: np.ndarray, stake: float) -> np.ndarray:
+        ov = np.asarray(opp_reach, dtype=np.float64) * self.valid
+        cum = np.empty(NUM_HANDS + 1)
+        cum[0] = 0.0
+        np.cumsum(ov[self.order], out=cum[1:])
+        total = cum[-1]
+        stronger_all = cum[self.lo_all]
+        weaker_all = total - cum[self.hi_all]
+
+        occ = ov[self.card_hands] * self.card_mask          # (NUM_CARDS, M)
+        cumc = np.zeros((occ.shape[0], self.M + 1))
+        np.cumsum(occ, axis=1, out=cumc[:, 1:])
+        total_c = cumc[:, -1]
+        stronger_c0 = cumc[self.c0, self.lo_c0]
+        weaker_c0 = total_c[self.c0] - cumc[self.c0, self.hi_c0]
+        stronger_c1 = cumc[self.c1, self.lo_c1]
+        weaker_c1 = total_c[self.c1] - cumc[self.c1, self.hi_c1]
+
+        win = weaker_all - weaker_c0 - weaker_c1
+        lose = stronger_all - stronger_c0 - stronger_c1
+        return stake * (win - lose) * self.valid
+
+
 def fold_values(opp_reach: np.ndarray, matched: float, hero_wins: bool,
                 board: list[int] | None = None) -> np.ndarray:
     """Per-hero-hand value when the hand ends on a fold (hand-independent up to
