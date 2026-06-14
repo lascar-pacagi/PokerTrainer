@@ -119,10 +119,33 @@ def validate_pushfold(stack_bb=10, n_deals=4_000_000, iters=4000) -> None:
     print("  OK: ReBeL CFR-D reproduces the push/fold Nash oracle ✓\n")
 
 
+# ─── (c) turn→river chance node (Phase 2b ground truth) ─────────────────────
+
+def validate_turn(seeds=(7, 11), stack_bb=6, iters=400) -> None:
+    """Full ground-truth turn→river tree (a real chance node: the river card)
+    must solve to ~0 exploitability — the exact check on the chance-node
+    card-removal math (per-card showdown matrices + 1/44 matchup normalizer)."""
+    from .public_tree import build_turn_subgame
+    print("── turn→river endgames (chance node = river card) ──")
+    for seed in seeds:
+        sg = build_turn_subgame(seed=seed, starting_stack_bb=stack_bb,
+                                allowed_actions=(0, 1, 10))
+        beliefs = _uniform_beliefs(sg)
+        sv = CfrSolver(sg, beliefs, num_iters=iters, linear=True)
+        sv.multistep()
+        e = exploitability_bb(sg, sv.average_strategy(), beliefs)
+        nch = sum(n.is_chance for n in sg.nodes)
+        print(f"  seed {seed:2d} stack {stack_bb}bb  nodes={len(sg.nodes):4d} "
+              f"chance={nch}  exploitability={e:.5f} bb/hand")
+        assert e < 0.05, f"turn→river exploitability too high: {e}"
+    print("  OK: turn→river ground truth converged to ~0 exploitability ✓\n")
+
+
 def main():
     validate_river()
     validate_pushfold()
-    print("Phase 1 validation PASSED.")
+    validate_turn()
+    print("Validation PASSED.")
 
 
 if __name__ == "__main__":

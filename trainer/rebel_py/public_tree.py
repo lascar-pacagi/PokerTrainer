@@ -46,6 +46,11 @@ class Node:
     # comes from the value net (queried via `public_state`). Phase 2+.
     is_net_leaf: bool = False
     public_state: Optional[PublicState] = None
+    # Chance node (Phase 2b): nature deals one board card. `children` are the
+    # per-card continuations and `chance_cards[k]` is the card dealt for child k.
+    # The value is the card-removal-correct mean over children (see solver).
+    is_chance: bool = False
+    chance_cards: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -74,6 +79,23 @@ def make_showdown_value(sign_matrix: np.ndarray, stake_bb: float):
     traversers (sign is 'row hand beats column hand')."""
     def fn(traverser: int, opp_reach: np.ndarray) -> np.ndarray:
         return stake_bb * (sign_matrix @ opp_reach)
+    return fn
+
+
+def make_chance_showdown_value(summed_sign: np.ndarray, stake_bb: float,
+                               divisor: float):
+    """All-in-on-the-turn runout, collapsed to one terminal.
+
+    Both players are all-in, so the river is pure chance and then showdown. The
+    chance-averaged value is (stake/divisor) · Σ_r sign_r · opp_reach, and since
+    Σ_r(sign_r @ x) = (Σ_r sign_r) @ x, a single matvec against the summed
+    'turn-equity' matrix replaces 48 per-card showdown matvecs. Each sign_r has
+    the dealt card's removal already baked in, so no per-card reach mask is
+    needed (it is redundant with the zeroed columns of sign_r)."""
+    scale = stake_bb / divisor
+
+    def fn(traverser: int, opp_reach: np.ndarray) -> np.ndarray:
+        return scale * (summed_sign @ opp_reach)
     return fn
 
 
@@ -184,6 +206,136 @@ def _fold_player(state) -> int:
         return int(hist[-1].actor)
     # Fallback: shouldn't happen for a fold terminal.
     return 0
+
+
+# ─── turn → river subgame (one chance node: the river card) ──────────────────
+
+_TURN, _RIVER = 2, 3
+
+
+def build_turn_subgame(seed: int = 7,
+                       starting_stack_bb: int = 6,
+                       allowed_actions: tuple[int, ...] = (0, 1, 10),
+                       river_cards: list[int] | None = None) -> Subgame:
+    """Full ground-truth turn→river tree with a real chance node.
+
+    Reach the turn (limp/check), enumerate turn betting; when a betting round
+    closes into the river, insert a CHANCE node whose children are one river
+    betting subtree per possible river card. The engine pre-deals all five board
+    cards, so the *active* turn board is the first four; the river ranges over
+    the 48 cards not among them. Betting legality is board-independent, so each
+    river subtree shares the same shape and differs only in its showdown matrix.
+
+    No value net — every leaf is a true terminal, which makes this the exact
+    ground-truth for validating the chance-node card-removal math (it must solve
+    to ~0 exploitability).
+    """
+    import pokertrainer_engine as pte
+
+    root = pte.Env(seed, starting_stack_bb * CHIPS_PER_BB)
+    root.reset(seed)
+    safety = 16
+    while not root.is_terminal() and int(root.state().street) < _TURN and safety > 0:
+        legal = [int(a) for a in root.observation().legal]
+        root.step(legal.index(_CHECK_CALL))
+        safety -= 1
+    st = root.state()
+    assert int(st.street) == _TURN and not root.is_terminal(), \
+        f"failed to reach a live turn (street={int(st.street)})"
+
+    turn_board = [int(c) for c in st.board][:4]
+    if river_cards is None:
+        river_cards = [c for c in range(52) if c not in turn_board]
+    divisor = float(52 - len(turn_board) - 4)  # 44 = unseen − hero(2) − opp(2)
+    # Per-river-card showdown matrix (float32: fast matvec, 48× ≈ 0.3 GB) and the
+    # summed "turn-equity" matrix for collapsed all-in runouts.
+    sign_by_card: dict[int, np.ndarray] = {}
+    summed_sign = np.zeros((NUM_HANDS, NUM_HANDS), dtype=np.float32)
+    for r in river_cards:
+        board5 = turn_board + [r]
+        ranks, valid = sd.hand_ranks(board5)
+        sm = sd.showdown_sign_matrix(ranks, valid, board5).astype(np.float32)
+        sign_by_card[r] = sm
+        summed_sign += sm
+
+    nodes: list[Node] = []
+
+    def _legal(env):
+        legal = [int(a) for a in env.observation().legal]
+        return [a for a in legal if a in allowed_actions]
+
+    def add_river(env, board5, sign_r) -> int:
+        nid = len(nodes)
+        nodes.append(Node(player=-1))
+        node = nodes[nid]
+        if env.is_terminal():
+            node.is_terminal = True
+            stt = env.state()
+            c0, c1 = _total_invested(stt)
+            matched_bb = min(c0, c1) / CHIPS_PER_BB
+            if int(stt.terminal) == 1:  # fold
+                node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), board5)
+            else:  # showdown
+                node.term_value = make_showdown_value(sign_r, matched_bb)
+            return nid
+        node.player = int(env.to_act())
+        for a in _legal(env):
+            child = env.clone(); child.step_action(pte.ActionType(a))
+            node.children.append(add_river(child, board5, sign_r))
+            node.actions.append(a)
+        return nid
+
+    def build_chance(river_env) -> int:
+        nid = len(nodes)
+        # All-in runout: both players are committed, river is pure chance →
+        # showdown. Collapse the 48 per-card showdowns into one terminal using
+        # the summed turn-equity matrix (48 matvecs → 1).
+        if river_env.is_terminal():
+            stt = river_env.state()
+            c0, c1 = _total_invested(stt)
+            matched_bb = min(c0, c1) / CHIPS_PER_BB
+            nodes.append(Node(player=-1, is_terminal=True,
+                              term_value=make_chance_showdown_value(
+                                  summed_sign, matched_bb, divisor)))
+            return nid
+        # River betting remains: a real chance node with one subtree per card.
+        nodes.append(Node(player=-1, is_chance=True))
+        node = nodes[nid]
+        for r in river_cards:
+            board5 = turn_board + [r]
+            sub = add_river(river_env.clone(), board5, sign_by_card[r])
+            node.children.append(sub)
+            node.chance_cards.append(r)
+        return nid
+
+    def add_turn(env) -> int:
+        nid = len(nodes)
+        nodes.append(Node(player=-1))
+        node = nodes[nid]
+        if env.is_terminal():  # a fold ends the hand on the turn
+            node.is_terminal = True
+            stt = env.state()
+            c0, c1 = _total_invested(stt)
+            matched_bb = min(c0, c1) / CHIPS_PER_BB
+            node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), turn_board)
+            return nid
+        node.player = int(env.to_act())
+        for a in _legal(env):
+            child = env.clone(); child.step_action(pte.ActionType(a))
+            cst = child.state()
+            if not child.is_terminal() and int(cst.street) == _RIVER:
+                cid = build_chance(child)      # turn round closed → river betting
+            elif child.is_terminal() and int(cst.terminal) == 2:
+                cid = build_chance(child)      # turn all-in called → river runout
+            else:
+                cid = add_turn(child)          # still on the turn, or a fold
+            node.children.append(cid)
+            node.actions.append(a)
+        return nid
+
+    add_turn(root)
+    return Subgame(nodes=nodes, n_hands=NUM_HANDS, board=turn_board,
+                   root_pot_bb=int(st.pot_chips) / CHIPS_PER_BB)
 
 
 # ─── re-rooting / depth-limiting an already-built tree ───────────────────────

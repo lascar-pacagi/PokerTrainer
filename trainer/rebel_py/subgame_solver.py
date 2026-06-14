@@ -55,6 +55,18 @@ class CfrSolver:
         self._valid = (board_free_mask(subgame.board).astype(np.float64)
                        if subgame.board else np.ones(self.H))
 
+        # Chance nodes (Phase 2b): one dealt board card per child. Precompute the
+        # per-child card-removal mask and the matchup normalizer. At the turn the
+        # river is 1 of (52 - 4 board - 2 hero - 2 opp) = 44 equally-likely cards.
+        self.chance_nodes = [nid for nid, nd in enumerate(self.nodes) if nd.is_chance]
+        self.chance_masks: dict[int, np.ndarray] = {}
+        self.chance_div = float(52 - len(subgame.board) - 4) if subgame.board else 1.0
+        for nid in self.chance_nodes:
+            nd = self.nodes[nid]
+            masks = np.stack([board_free_mask(list(subgame.board) + [int(r)])
+                              for r in nd.chance_cards]).astype(np.float64)
+            self.chance_masks[nid] = masks  # (n_children, H)
+
         # parent[node], slot[node] = index of `node` within parent.children.
         n = len(self.nodes)
         self.parent = np.full(n, -1, dtype=np.int64)
@@ -70,7 +82,7 @@ class CfrSolver:
         self.sumstrat: list[np.ndarray | None] = [None] * n   # reach-weighted cum
         self.avg: list[np.ndarray | None] = [None] * n        # average strategy
         for nid, node in enumerate(self.nodes):
-            if not node.is_terminal and not node.is_net_leaf:
+            if not node.is_terminal and not node.is_net_leaf and not node.is_chance:
                 a = len(node.children)
                 self.regret[nid] = np.zeros((self.H, a))
                 self.cur[nid] = np.full((self.H, a), 1.0 / a)
@@ -87,7 +99,10 @@ class CfrSolver:
         out[0] = self.beliefs[player]
         for nid in range(1, len(self.nodes)):
             par = int(self.parent[nid])
-            if self.nodes[par].player == player:
+            par_node = self.nodes[par]
+            if par_node.is_chance:
+                out[nid] = out[par] * self.chance_masks[par][int(self.slot[nid])]
+            elif par_node.player == player:
                 out[nid] = out[par] * strat[par][:, int(self.slot[nid])]
             else:
                 out[nid] = out[par]
@@ -122,6 +137,12 @@ class CfrSolver:
                 continue
             if node.is_net_leaf:
                 continue  # value already set by _compute_net_leaf_values
+            if node.is_chance:
+                v = np.zeros(self.H)
+                for c in node.children:
+                    v += self.values[c]
+                self.values[nid] = v / self.chance_div
+                continue
             if node.player == traverser:
                 v = np.zeros(self.H)
                 reg = self.regret[nid]
