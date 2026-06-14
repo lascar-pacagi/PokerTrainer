@@ -279,6 +279,7 @@ def build_turn_subgame(seed: int = 7,
                 node.term_value = make_showdown_value(sign_r, matched_bb)
             return nid
         node.player = int(env.to_act())
+        node.public_state = _public_state_of(env, board5)  # river PBS (5-card board)
         for a in _legal(env):
             child = env.clone(); child.step_action(pte.ActionType(a))
             node.children.append(add_river(child, board5, sign_r))
@@ -320,6 +321,7 @@ def build_turn_subgame(seed: int = 7,
             node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), turn_board)
             return nid
         node.player = int(env.to_act())
+        node.public_state = _public_state_of(env, turn_board)  # turn PBS (4-card board)
         for a in _legal(env):
             child = env.clone(); child.step_action(pte.ActionType(a))
             cst = child.state()
@@ -341,14 +343,18 @@ def build_turn_subgame(seed: int = 7,
 # ─── re-rooting / depth-limiting an already-built tree ───────────────────────
 
 def subtree_subgame(full: Subgame, root_nid: int,
-                    max_depth: int | None) -> Subgame:
+                    max_depth: int | None,
+                    stop_at_chance: bool = False) -> Subgame:
     """A depth-limited subgame rooted at `root_nid` of an existing tree.
 
     Copies the subtree from `root_nid`, renumbering nodes from 0. Decision nodes
     at `max_depth` (counted from the new root) become value-net leaves, carrying
-    the `public_state` recorded at build time. True terminals and pre-existing
-    net leaves are copied verbatim. This is how the ReBeL recursion re-solves a
-    fresh subgame at each sampled public state without touching the engine.
+    the `public_state` recorded at build time. True terminals, pre-existing net
+    leaves, and chance nodes (with their `chance_cards`) are copied verbatim.
+    With `stop_at_chance`, a chance node's children become value-net leaves —
+    this is the ReBeL turn subgame, where the net values the post-chance river
+    PBSs. The board of the produced subgame is the root node's board if known
+    (a river re-root carries a 5-card board), else the tree's board.
     """
     old = full.nodes
     new_nodes: list[Node] = []
@@ -357,10 +363,22 @@ def subtree_subgame(full: Subgame, root_nid: int,
         on = old[old_id]
         nn = Node(player=on.player, is_terminal=on.is_terminal,
                   term_value=on.term_value, is_net_leaf=on.is_net_leaf,
-                  public_state=on.public_state)
+                  public_state=on.public_state, is_chance=on.is_chance,
+                  chance_cards=list(on.chance_cards))
         new_id = len(new_nodes)
         new_nodes.append(nn)
         if on.is_terminal or on.is_net_leaf:
+            return new_id
+        if on.is_chance:
+            for c in on.children:
+                if stop_at_chance:
+                    co = old[c]
+                    leaf = Node(player=co.player, is_net_leaf=True,
+                                public_state=co.public_state)
+                    cid = len(new_nodes); new_nodes.append(leaf)
+                else:
+                    cid = copy(c, depth + 1)
+                nn.children.append(cid)
             return new_id
         if max_depth is not None and depth >= max_depth:
             nn.is_net_leaf = True   # truncate this decision node into a leaf
@@ -372,7 +390,8 @@ def subtree_subgame(full: Subgame, root_nid: int,
         return new_id
 
     copy(root_nid, 0)
-    ps = old[root_nid].public_state
-    root_pot = ps.pot_bb if ps is not None else full.root_pot_bb
-    return Subgame(nodes=new_nodes, n_hands=full.n_hands, board=full.board,
+    rootps = old[root_nid].public_state
+    root_board = rootps.board if (rootps is not None and rootps.board) else list(full.board)
+    root_pot = rootps.pot_bb if rootps is not None else full.root_pot_bb
+    return Subgame(nodes=new_nodes, n_hands=full.n_hands, board=root_board,
                    root_pot_bb=root_pot)

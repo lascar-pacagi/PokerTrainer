@@ -126,6 +126,59 @@ def train(cfg: RebelConfig):
     return net
 
 
+def train_turn(seeds=(7, 11), stack_bb=6, cfr_iters=192, epochs=40,
+               games_per_epoch=24, batches_per_epoch=64, batch_size=256,
+               n_hidden=512, n_layers=3, lr=5e-4, eval_every=4, eval_iters=160,
+               device="cpu", seed=0):
+    """Phase 2b cross-street self-play (turn→river, one chance node).
+
+    One value net spans both streets: self-play solves the turn subgame with the
+    post-chance river PBSs as net leaves (``stop_at_chance``), then descends
+    through the chance node and solves the river exactly — emitting (query,value)
+    for *both* turn and river PBSs. The gate is the exploitability of the
+    recursively-resolved strategy measured in the exact ground-truth turn→river
+    tree; it must fall as the net learns.
+    """
+    from .public_tree import build_turn_subgame
+    if device == "cpu":
+        torch.set_num_threads(1)
+    rng = np.random.default_rng(seed); torch.manual_seed(seed)
+    trees = [build_turn_subgame(seed=s, starting_stack_bb=stack_bb,
+                                allowed_actions=(0, 1, 10)) for s in seeds]
+    qdim = query_dim()
+    net = ValueNet(qdim, n_hidden=n_hidden, n_layers=n_layers).to(device)
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    lossf = torch.nn.SmoothL1Loss()
+    buf = QueryValueBuffer(300_000, qdim, NUM_HANDS, seed=seed)
+    vfn = NetValueFn(net, device)
+    gen = SubgameParams(depth_limit=None, num_iters=cfr_iters,
+                        random_action_prob=0.25, stop_at_chance=True)
+
+    def exploit(iters):
+        p = SubgameParams(depth_limit=None, num_iters=iters,
+                          random_action_prob=0.0, stop_at_chance=True)
+        return float(np.mean([exploitability_bb(t, recursive_strategy(t, vfn, p),
+                                                uniform_beliefs(t.board)) for t in trees]))
+
+    print(f"# turn→river  boards={len(trees)} stack={stack_bb}bb  query_dim={qdim}")
+    print(f"epoch  0  exploit={exploit(eval_iters):.5f} bb/hand  (untrained net)")
+    last = float("nan")
+    for epoch in range(1, epochs + 1):
+        net.eval()
+        for _ in range(games_per_epoch):
+            RlRunner(trees[int(rng.integers(len(trees)))], vfn, gen, buf, rng).step()
+        net.train()
+        for _ in range(batches_per_epoch):
+            q, v = buf.sample(batch_size)
+            loss = lossf(net(torch.as_tensor(q, device=device)),
+                         torch.as_tensor(v, device=device))
+            opt.zero_grad(); loss.backward(); opt.step(); last = float(loss.item())
+        if epoch % eval_every == 0 or epoch == epochs:
+            print(f"epoch {epoch:>2d}  buf={len(buf):>7d}  loss={last:.4f}  "
+                  f"exploit={exploit(eval_iters):.5f} bb/hand")
+    return net
+
+
 def save_checkpoint(net: ValueNet, cfg: RebelConfig, path: str) -> None:
     """state_dict + config + a TorchScript trace (for a future C++/FFI consumer,
     mirroring the CFR trainer's export discipline)."""

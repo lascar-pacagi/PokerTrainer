@@ -54,6 +54,14 @@ class CfrSolver:
         self._qdim = query_dim()
         self._valid = (board_free_mask(subgame.board).astype(np.float64)
                        if subgame.board else np.ones(self.H))
+        # A net leaf carries its own board (a river leaf of a turn subgame is a
+        # 5-card board, not the 4-card turn board), so mask each leaf's output by
+        # its own validity, not the subgame root's.
+        self.net_leaf_valid = {}
+        for nid in self.net_leaves:
+            ps = self.nodes[nid].public_state
+            self.net_leaf_valid[nid] = (board_free_mask(ps.board).astype(np.float64)
+                                        if ps is not None and ps.board else self._valid)
 
         # Chance nodes (Phase 2b): one dealt board card per child. Precompute the
         # per-child card-removal mask and the matchup normalizer. At the turn the
@@ -119,7 +127,7 @@ class CfrSolver:
         vals = np.asarray(self.value_fn(queries), dtype=np.float64)  # (N, H), normalized
         for row, nid in enumerate(self.net_leaves):
             mass = float(self.reach[opp][nid].sum())
-            self.values[nid] = vals[row] * self._valid * mass
+            self.values[nid] = vals[row] * self.net_leaf_valid[nid] * mass
 
     # ─── one alternating CFR step for `traverser` ────────────────────────────
     def step(self, traverser: int) -> None:

@@ -94,10 +94,36 @@ def test_turn_runout_equity_vs_bruteforce():
     print(f"  turn runout equity matches evaluate7 ({net}/44) ✓")
 
 
+def test_turn_netleaf_subgame():
+    """The depth-limited turn subgame (stop_at_chance) values the post-chance
+    river PBSs with the net: 48 net leaves (one per unseen card), each a 5-card
+    river board, masked by its own validity (not the 4-card turn board)."""
+    import torch
+    from rebel_py.public_tree import subtree_subgame
+    from rebel_py.models import ValueNet, NetValueFn
+    from rebel_py.pbs import query_dim
+    full = build_turn_subgame(seed=7, starting_stack_bb=6, allowed_actions=(0, 1, 10))
+    dl = subtree_subgame(full, 0, None, stop_at_chance=True)
+    leaves = [i for i, n in enumerate(dl.nodes) if n.is_net_leaf]
+    assert len(leaves) == 48
+    for i in leaves:
+        assert dl.nodes[i].public_state is not None
+        assert len(dl.nodes[i].public_state.board) == 5
+    torch.manual_seed(0)
+    net = ValueNet(query_dim(), n_hidden=32, n_layers=2)
+    vfn = NetValueFn(net, "cpu")
+    b = uniform_beliefs(full.board)
+    sv = CfrSolver(dl, (b[0].copy(), b[1].copy()), num_iters=4, value_fn=vfn)
+    sv.multistep()
+    assert int(sv.net_leaf_valid[leaves[0]].sum()) == 1081  # C(47,2) on a 5-card board
+    print("  turn netleaf subgame: 48 river-PBS net leaves, per-leaf 5-card masks ✓")
+
+
 def main():
     print("[test_rebel_phase2b] running...")
     test_turn_subgame_structure()
     test_turn_runout_equity_vs_bruteforce()
+    test_turn_netleaf_subgame()
     print("[test_rebel_phase2b] all tests passed ✓")
 
 

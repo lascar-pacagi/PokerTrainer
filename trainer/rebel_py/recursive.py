@@ -37,10 +37,11 @@ from .hand_index import board_free_mask, NUM_HANDS
 
 @dataclass
 class SubgameParams:
-    depth_limit: int = 2          # betting actions before a value-net leaf
+    depth_limit: int | None = 2   # betting actions before a value-net leaf
     num_iters: int = 64           # CFR iterations per subgame solve
     random_action_prob: float = 0.25
     linear: bool = True
+    stop_at_chance: bool = False  # Phase 2b: value the post-chance (river) PBSs
 
 
 def uniform_beliefs(board) -> list[np.ndarray]:
@@ -63,10 +64,21 @@ class RlRunner:
                       if full.board else np.ones(NUM_HANDS))
 
     def _solve(self, node_id: int, beliefs):
-        sub = subtree_subgame(self.full, node_id, self.params.depth_limit)
+        sub = subtree_subgame(self.full, node_id, self.params.depth_limit,
+                              stop_at_chance=self.params.stop_at_chance)
         return CfrSolver(sub, (beliefs[0], beliefs[1]),
                          num_iters=self.params.num_iters, linear=self.params.linear,
                          value_fn=self.value_fn)
+
+    def _sample_chance(self, node_id: int, beliefs):
+        """Nature deals a river card: sample uniformly over the unseen cards, then
+        remove the dealt card from both players' ranges (card removal)."""
+        node = self.full.nodes[node_id]
+        k = int(self.rng.integers(0, len(node.children)))
+        r = int(node.chance_cards[k])
+        mask = board_free_mask(list(self.full.board) + [r]).astype(np.float64)
+        nb = [_normalize_safe(beliefs[0] * mask), _normalize_safe(beliefs[1] * mask)]
+        return node.children[k], nb
 
     def _sample_next(self, node_id: int, solver: CfrSolver, beliefs):
         node = self.full.nodes[node_id]
@@ -91,9 +103,11 @@ class RlRunner:
 
     def _emit(self, node_id: int, solver: CfrSolver, beliefs):
         ps = self.full.nodes[node_id].public_state
+        mask = (board_free_mask(ps.board).astype(np.float64)
+                if ps is not None and ps.board else self.valid)
         for trav in (0, 1):
             q = encode_query(trav, ps, beliefs[0], beliefs[1]).astype(np.float32)
-            tgt = (solver.get_hand_values(trav) * self.valid).astype(np.float32)
+            tgt = (solver.get_hand_values(trav) * mask).astype(np.float32)
             self.buffer.add(q, tgt)
 
     def step(self) -> int:
@@ -103,6 +117,9 @@ class RlRunner:
         emitted = 0
         K = self.params.num_iters
         while not self.full.nodes[node_id].is_terminal:
+            if self.full.nodes[node_id].is_chance:    # nature deals the river card
+                node_id, beliefs = self._sample_chance(node_id, beliefs)
+                continue
             solver = self._solve(node_id, beliefs)
             act_iter = int(self.rng.integers(0, K + 1))
             for i in range(act_iter):
@@ -132,12 +149,13 @@ def recursive_strategy(full: Subgame, value_fn: ValueFn, params: SubgameParams):
     n = len(full.nodes)
     strat: list = [None] * n
     for nid, nd in enumerate(full.nodes):
-        if not nd.is_terminal and not nd.is_net_leaf:
+        if not nd.is_terminal and not nd.is_net_leaf and not nd.is_chance:
             a = len(nd.children)
             strat[nid] = np.full((NUM_HANDS, a), 1.0 / a)
 
     def rec(root_full_id: int, beliefs):
-        sub = subtree_subgame(full, root_full_id, params.depth_limit)
+        sub = subtree_subgame(full, root_full_id, params.depth_limit,
+                              stop_at_chance=params.stop_at_chance)
         sv = CfrSolver(sub, (beliefs[0], beliefs[1]), num_iters=params.num_iters,
                        linear=params.linear, value_fn=value_fn)
         sv.multistep()
@@ -154,9 +172,14 @@ def recursive_strategy(full: Subgame, value_fn: ValueFn, params: SubgameParams):
             if snd.is_net_leaf:                      # partial-tree leaf → re-solve
                 rec(full_id, [_normalize_safe(bel[0]), _normalize_safe(bel[1])])
                 continue
+            fnode = full.nodes[full_id]
+            if snd.is_chance:                        # nature: no strategy, mask beliefs
+                for k, (sc, fc) in enumerate(zip(snd.children, fnode.children)):
+                    mask = board_free_mask(list(sub.board) + [int(snd.chance_cards[k])])
+                    queue.append((sc, fc, [bel[0] * mask, bel[1] * mask]))
+                continue
             strat[full_id] = avg[sub_id]             # consistent: from THIS solve
             p = snd.player
-            fnode = full.nodes[full_id]
             for k, (sc, fc) in enumerate(zip(snd.children, fnode.children)):
                 nb = [bel[0].copy(), bel[1].copy()]
                 nb[p] = bel[p] * avg[sub_id][:, k]
