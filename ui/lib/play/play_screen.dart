@@ -73,11 +73,15 @@ class _PlayScreenState extends State<PlayScreen> {
                             child: TableView(
                               session: session,
                               labelFor: (p) => _match.seatLabel(p),
-                              // Your own cards always visible; opponents shown
-                              // only when the eye is on AND their cards are known.
+                              // Your own cards always visible. An opponent's are
+                              // shown when their cards are known AND either the
+                              // eye is on or the hand is over — so a showdown
+                              // auto-reveals the bot's hand (Slumbot only
+                              // discloses it then) without needing the toggle.
                               faceDownOf: (p) => _match.isHumanSeat(p)
                                   ? false
-                                  : !(_reveal && _match.cardsKnown(p)),
+                                  : !(_match.cardsKnown(p) &&
+                                      (_reveal || session.isTerminal)),
                               bubbleFor: (p) => _match.bubbleFor(p),
                             ),
                           ),

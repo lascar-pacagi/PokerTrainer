@@ -187,14 +187,31 @@ class MatchController extends ChangeNotifier {
   }
 
   // ─── action bubbles ("Raise to 6 bb" over the acting seat) ───────────────
+  //
+  // A bubble belongs to the betting round it was made on. When play advances to
+  // a new street (the flop/turn/river is dealt), the previous round's labels are
+  // stale and must clear — like the action chips clearing in PokerStars. We tag
+  // the live bubbles with `_bubbleStreet` and drop them the moment a later
+  // street is reached (a new-street action OR the board running out to it).
 
   final Map<Player, String?> _bubbles = {Player.sb: null, Player.bb: null};
+  Street _bubbleStreet = Street.preflop;
 
   String? bubbleFor(Player p) => _bubbles[p];
 
   void _clearBubbles() {
     _bubbles[Player.sb] = null;
     _bubbles[Player.bb] = null;
+    _bubbleStreet = Street.preflop;
+  }
+
+  /// Drop the current bubbles if `street` is past the one they belong to (so the
+  /// preflop labels vanish when the flop arrives, etc.). Cheap and idempotent.
+  void _bubbleStreetGate(Street street) {
+    if (street.index > _bubbleStreet.index) {
+      _clearBubbles();
+      _bubbleStreet = street;
+    }
   }
 
   String _bbAmt(int chips) {
@@ -313,6 +330,7 @@ class MatchController extends ChangeNotifier {
     final type = obs.legal[legalIdx];
     final sizing = obs.sizingForLegal(legalIdx);
     final toCall = session.tableState.toCallChips;
+    final myStreet = session.tableState.street; // the round we are acting in
     final myLabel = _bubbleLabel(type, toCallChips: toCall, betToChips: sizing);
 
     // Apply our action to the mirror first (instant UI feedback), then post.
@@ -321,6 +339,7 @@ class MatchController extends ChangeNotifier {
     } else {
       session.applyRaiseToDirect(sizing); // RAISE_* / ALL_IN → exact chips
     }
+    _bubbleStreetGate(myStreet);          // dropped stale labels if a new round
     _bubbles[_localSeat] = myLabel;
     _appliedTokens += 1;
     final incr = encodeAction(type, toCallChips: toCall, betToChips: sizing);
@@ -350,7 +369,9 @@ class MatchController extends ChangeNotifier {
     for (int i = _appliedTokens; i < tokens.length; i++) {
       final a = tokens[i].action;
       final actor = session.tableState.toAct; // who is about to act
+      final street = session.tableState.street; // the round this action is in
       final label = _bubbleTokenLabel(a);     // computed from pre-apply state
+      _bubbleStreetGate(street);               // a new round? drop the old labels
       switch (a) {
         case SbFold():
           session.applyActionDirect(ActionType.fold);
@@ -368,6 +389,9 @@ class MatchController extends ChangeNotifier {
     _appliedTokens = tokens.length;
 
     session.injectBoard(boardSlots(resp.board));
+    // The board may have run out to a new street with no action yet (the round
+    // closed on the last token) — clear the just-shown round's labels for it.
+    _bubbleStreetGate(session.tableState.street);
 
     if (resp.handOver) {
       if (resp.botHoleCards != null && resp.botHoleCards!.length == 2) {
