@@ -148,6 +148,50 @@ class RiverShowdown:
         return stake * (win - lose) * self.valid
 
 
+class FoldRemoval:
+    """Fold value without a dense (H, H) matrix.
+
+        v[h] = sign · matched · Σ_{h' valid, h'∩h=∅} opp_reach[h']
+
+    The card-removal sum is inclusion-exclusion over h's two cards:
+
+        Σ_{h'∩h=∅} = total − S[c0] − S[c1] + opp_reach[h]
+
+    where S[c] = opp mass on hands containing card c (the +opp_reach[h] adds back
+    the only hand counted in both S[c0] and S[c1] — h itself — which the sum must
+    exclude). The card→hand incidence is board-independent, so a single shared
+    (52, H) matrix serves every river card; only the validity mask is per-board.
+    O(52·H) and ~70 KB shared, vs a 14 MB dense matrix per fold terminal.
+    """
+
+    _INCIDENCE = None  # (NUM_CARDS, H) 0/1, shared
+
+    def __init__(self, valid: np.ndarray):
+        from .hand_index import NUM_CARDS
+        self.valid = np.asarray(valid, dtype=np.float64)
+        self.c0 = HAND_CARDS[:, 0].astype(np.int64)
+        self.c1 = HAND_CARDS[:, 1].astype(np.int64)
+        if FoldRemoval._INCIDENCE is None:
+            inc = np.zeros((NUM_CARDS, NUM_HANDS))
+            idx = np.arange(NUM_HANDS)
+            inc[HAND_CARDS[:, 0], idx] = 1.0
+            inc[HAND_CARDS[:, 1], idx] = 1.0
+            FoldRemoval._INCIDENCE = inc
+
+    def values(self, opp_reach: np.ndarray, sign: float, matched: float) -> np.ndarray:
+        ov = np.asarray(opp_reach, dtype=np.float64) * self.valid   # mask invalid OPP
+        total = ov.sum()
+        S = FoldRemoval._INCIDENCE @ ov                     # (NUM_CARDS,)
+        # Σ_{h'∩h=∅}, for EVERY hero hand. We deliberately do NOT mask invalid
+        # hero hands: the dense `make_fold_value` (compat @ opp) leaves them
+        # nonzero too (they carry zero reach, so harmless), and the incidence
+        # formula already reproduces that value — an invalid h=(board_card, x)
+        # has S[board_card]=0, so kept = total − S[x], exactly the dense row.
+        # Masking hero here would make this differ from the dense fold.
+        kept = total - S[self.c0] - S[self.c1] + ov
+        return sign * matched * kept
+
+
 def fold_values(opp_reach: np.ndarray, matched: float, hero_wins: bool,
                 board: list[int] | None = None) -> np.ndarray:
     """Per-hero-hand value when the hand ends on a fold (hand-independent up to

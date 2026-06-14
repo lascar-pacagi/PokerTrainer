@@ -89,6 +89,14 @@ def make_river_showdown_value(rs: "sd.RiverShowdown", stake_bb: float):
     return fn
 
 
+def make_fold_value_fast(fr: "sd.FoldRemoval", matched_bb: float, winner: int):
+    """Fold value via the incidence primitive (no dense (H, H) compat matrix)."""
+    def fn(traverser: int, opp_reach: np.ndarray) -> np.ndarray:
+        sign = 1.0 if traverser == winner else -1.0
+        return fr.values(opp_reach, sign, matched_bb)
+    return fn
+
+
 def make_chance_showdown_value(rs_list: list, stake_bb: float, divisor: float):
     """All-in-on-the-turn runout, collapsed to one terminal: the chance-averaged
     showdown (stake/divisor)·Σ_r showdown_r(opp_reach). Each per-card showdown is
@@ -256,10 +264,13 @@ def build_turn_subgame(seed: int = 7,
     # ~5 MB total (was ~0.3 GB) — the difference between fitting many turn actors
     # on a node and the OOM killer taking them.
     rs_by_card: dict[int, "sd.RiverShowdown"] = {}
+    fr_by_card: dict[int, "sd.FoldRemoval"] = {}
     for r in river_cards:
         ranks, valid = sd.hand_ranks(turn_board + [r])
         rs_by_card[r] = sd.RiverShowdown(ranks, valid)
+        fr_by_card[r] = sd.FoldRemoval(valid)
     rs_list = [rs_by_card[r] for r in river_cards]
+    fr_turn = sd.FoldRemoval(board_free_mask(turn_board))
 
     nodes: list[Node] = []
 
@@ -267,7 +278,7 @@ def build_turn_subgame(seed: int = 7,
         legal = [int(a) for a in env.observation().legal]
         return [a for a in legal if a in allowed_actions]
 
-    def add_river(env, board5, rs) -> int:
+    def add_river(env, board5, rs, fr) -> int:
         nid = len(nodes)
         nodes.append(Node(player=-1))
         node = nodes[nid]
@@ -277,7 +288,7 @@ def build_turn_subgame(seed: int = 7,
             c0, c1 = _total_invested(stt)
             matched_bb = min(c0, c1) / CHIPS_PER_BB
             if int(stt.terminal) == 1:  # fold
-                node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), board5)
+                node.term_value = make_fold_value_fast(fr, matched_bb, 1 - _fold_player(stt))
             else:  # showdown
                 node.term_value = make_river_showdown_value(rs, matched_bb)
             return nid
@@ -285,7 +296,7 @@ def build_turn_subgame(seed: int = 7,
         node.public_state = _public_state_of(env, board5)  # river PBS (5-card board)
         for a in _legal(env):
             child = env.clone(); child.step_action(pte.ActionType(a))
-            node.children.append(add_river(child, board5, rs))
+            node.children.append(add_river(child, board5, rs, fr))
             node.actions.append(a)
         return nid
 
@@ -307,7 +318,7 @@ def build_turn_subgame(seed: int = 7,
         node = nodes[nid]
         for r in river_cards:
             board5 = turn_board + [r]
-            sub = add_river(river_env.clone(), board5, rs_by_card[r])
+            sub = add_river(river_env.clone(), board5, rs_by_card[r], fr_by_card[r])
             node.children.append(sub)
             node.chance_cards.append(r)
         return nid
@@ -321,7 +332,7 @@ def build_turn_subgame(seed: int = 7,
             stt = env.state()
             c0, c1 = _total_invested(stt)
             matched_bb = min(c0, c1) / CHIPS_PER_BB
-            node.term_value = make_fold_value(matched_bb, 1 - _fold_player(stt), turn_board)
+            node.term_value = make_fold_value_fast(fr_turn, matched_bb, 1 - _fold_player(stt))
             return nid
         node.player = int(env.to_act())
         node.public_state = _public_state_of(env, turn_board)  # turn PBS (4-card board)

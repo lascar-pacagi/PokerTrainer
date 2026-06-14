@@ -112,6 +112,25 @@ def test_river_showdown_matches_dense():
     print("  rank-vector cumsum showdown matches dense matrix ✓")
 
 
+def test_fold_removal_matches_dense():
+    """The incidence fold primitive (replaces 98 dense 1326² fold matrices ≈
+    1.4 GB per turn tree) must equal the dense make_fold_value `compat @ reach`
+    for EVERY hero hand — including invalid ones (the dense fold leaves those
+    nonzero, and the measured exploitability is sensitive to it)."""
+    from rebel_py import showdown as sd
+    from rebel_py.hand_index import CONFLICT
+    rng = np.random.default_rng(0)
+    for board in ([0, 4, 8, 20, 40], [17, 21, 44, 20, 27], [3, 11, 25, 33, 49]):
+        free = board_free_mask(board)
+        compat = (~CONFLICT).astype(np.float64) * free[None, :]   # dense fold matrix
+        fr = sd.FoldRemoval(free)
+        for _ in range(4):
+            opp = (rng.random(NUM_HANDS) * free) ** rng.uniform(0.3, 3.0)
+            sign, matched = rng.choice([-1.0, 1.0]), rng.uniform(1, 20)
+            assert np.abs(sign * matched * (compat @ opp) - fr.values(opp, sign, matched)).max() < 1e-7
+    print("  incidence fold matches dense compat (all hands) ✓")
+
+
 def test_turn_netleaf_subgame():
     """The depth-limited turn subgame (stop_at_chance) values the post-chance
     river PBSs with the net: 48 net leaves (one per unseen card), each a 5-card
@@ -142,6 +161,7 @@ def main():
     test_turn_subgame_structure()
     test_turn_runout_equity_vs_bruteforce()
     test_river_showdown_matches_dense()
+    test_fold_removal_matches_dense()
     test_turn_netleaf_subgame()
     print("[test_rebel_phase2b] all tests passed ✓")
 
