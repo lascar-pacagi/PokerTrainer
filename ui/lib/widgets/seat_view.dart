@@ -20,6 +20,10 @@ class SeatView extends StatelessWidget {
   /// Transient "last action" caption shown as a pill above the seat
   /// ("Raise to 6 bb", "Check", "Call", "Fold"…), poker-client style.
   final String? actionBubble;
+  /// Optional caption shown beneath face-down cards when the viewer asked to
+  /// peek but this seat's cards aren't available to reveal yet (e.g. Slumbot,
+  /// which only discloses its hand at showdown). Null → no caption.
+  final String? revealHint;
 
   const SeatView({
     super.key,
@@ -31,6 +35,7 @@ class SeatView extends StatelessWidget {
     this.agentLabel,
     this.equityFraction,
     this.actionBubble,
+    this.revealHint,
   });
 
   @override
@@ -89,13 +94,38 @@ class SeatView extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Hole cards (bigger).
-          Row(
+          // Hole cards (bigger). A reveal hint sits beneath them when the eye
+          // is on but these cards aren't available to peek (Slumbot pre-show).
+          Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CardView(card: holeCards[0], faceDown: faceDown, width: 64),
-              const SizedBox(width: 6),
-              CardView(card: holeCards[1], faceDown: faceDown, width: 64),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CardView(card: holeCards[0], faceDown: faceDown, width: 64),
+                  const SizedBox(width: 6),
+                  CardView(card: holeCards[1], faceDown: faceDown, width: 64),
+                ],
+              ),
+              if (revealHint != null) ...[
+                const SizedBox(height: 5),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.lock_outline,
+                        size: 12, color: Color(0x99EAE6D9)),
+                    const SizedBox(width: 4),
+                    Text(
+                      revealHint!,
+                      style: const TextStyle(
+                        color: Color(0x99EAE6D9),
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
           const SizedBox(width: 16),

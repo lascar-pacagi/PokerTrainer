@@ -83,6 +83,11 @@ class _PlayScreenState extends State<PlayScreen> {
                                   : !(_match.cardsKnown(p) &&
                                       (_reveal || session.isTerminal)),
                               bubbleFor: (p) => _match.bubbleFor(p),
+                              // When the eye is on but an opponent's cards
+                              // aren't in the engine yet, explain why the peek
+                              // is empty. Only Slumbot withholds mid-hand —
+                              // your own loaded bots reveal immediately.
+                              revealHintFor: (p) => _revealHintFor(p, session),
                             ),
                           ),
                           const SizedBox(height: 16),
@@ -103,6 +108,19 @@ class _PlayScreenState extends State<PlayScreen> {
         );
       },
     );
+  }
+
+  /// Caption for a face-down opponent seat when the user toggled reveal but the
+  /// cards aren't peekable yet. Returns null unless the eye is on, the seat is a
+  /// non-human opponent, the hand is live, and the cards are genuinely unknown
+  /// (Slumbot pre-showdown) — your own loaded bots are dealt locally, so
+  /// `cardsKnown` is already true for them and they simply reveal.
+  String? _revealHintFor(Player p, GameSession session) {
+    if (!_reveal || _match.isHumanSeat(p)) return null;
+    if (_match.cardsKnown(p) || session.isTerminal) return null;
+    return _match.isSlumbotMatch && p == _match.slumbotSeat
+        ? 'shown at showdown'
+        : null;
   }
 
   // ─── controls ─────────────────────────────────────────────────────────────

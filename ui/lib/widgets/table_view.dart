@@ -26,6 +26,10 @@ class TableView extends StatelessWidget {
   /// Optional transient "last action" caption per seat ("Raise to 6 bb"…).
   final String? Function(Player p)? bubbleFor;
 
+  /// Optional caption beneath a face-down seat when the viewer toggled reveal
+  /// but the cards aren't available yet (e.g. Slumbot's "shown at showdown").
+  final String? Function(Player p)? revealHintFor;
+
   const TableView({
     super.key,
     required this.session,
@@ -33,6 +37,7 @@ class TableView extends StatelessWidget {
     this.labelFor,
     this.faceDownOf,
     this.bubbleFor,
+    this.revealHintFor,
   });
 
   @override
@@ -66,6 +71,7 @@ class TableView extends StatelessWidget {
         agentLabel: labelFor != null ? labelFor!(p) : _agentLabel(session.agentFor(p)),
         equityFraction: eq,
         actionBubble: bubbleFor != null ? bubbleFor!(p) : null,
+        revealHint: revealHintFor != null ? revealHintFor!(p) : null,
       );
     }
 
