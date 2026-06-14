@@ -1176,10 +1176,10 @@ ReBeL is sound but poker-shaped. Player of Games (PoG) asks: what is the
 def gt_cfr(beliefs, cvpn, n_rounds):
     tree = PublicTree(root=beliefs)            # starts tiny
     for _ in range(n_rounds):
-        for _ in range(E):                     # ── EXPAND ──
+        for _ in range(E):                     # -- EXPAND --
             leaf = descend_by_policy_and_visits(tree)
             tree.add_children(leaf, prior=cvpn.policy(leaf))
-        for _ in range(R):                     # ── REGRET UPDATE ──
+        for _ in range(R):                     # -- REGRET UPDATE --
             cfr_iteration(tree, leaf_values=cvpn.values)
     return tree.root_policy(), tree.root_values()
 
@@ -1199,6 +1199,101 @@ query becomes a promise to go back later, search deeper from that spot, and
 return with a better value to learn from. Compare our project's stage-1 oracle:
 the principle ``validate the function where you actually rely on it'' is the
 same; PoG just turns it into the training signal itself.
+\end{intuition}
+
+\subsection{One GT-CFR round under the microscope: growing a tree}
+
+The listing's two inner loops --- \texttt{EXPAND} then the CFR \texttt{REGRET}
+sweep --- are clearest on the same miniature used for ReBeL: each player holds
+one of three hand types $A$ (nuts), $B$ (medium), $C$ (air); flop pot 6; a single
+bet size; the street ends at the depth limit. What changes from ReBeL is
+\emph{what gets built}. ReBeL constructed the \emph{entire} subgame in one shot
+and solved all of it; GT-CFR starts from almost nothing and \emph{grows} into the
+regions its policy prior cares about. Watch one round.
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=1.8mm]},
+  p1/.style={rectangle, draw=heroG, fill=heroG!12, thick, minimum size=5.5mm, inner sep=1pt, font=\scriptsize},
+  p2/.style={circle, draw=villR, fill=villR!12, thick, minimum size=5.5mm, inner sep=1pt, font=\scriptsize},
+  stub/.style={rectangle, rounded corners=1mm, draw=memO, fill=orange!15, thick, minimum size=4.5mm, font=\tiny, inner sep=1.5pt, align=center},
+  done/.style={rectangle, rounded corners=1mm, draw=memO, fill=orange!32, thick, minimum size=4.5mm, font=\tiny, inner sep=1.5pt, align=center},
+  el/.style={font=\tiny, fill=white, inner sep=0.5pt}]
+
+  % panel (a)
+  \node[p1] (ra) at (0,3.0) {P1};
+  \node[stub] (ac) at (-0.9,1.6) {chk\\$\hat\pi{=}.35$};
+  \node[stub] (ab) at (0.9,1.6) {bet\\$\hat\pi{=}.65$};
+  \draw[->] (ra) -- (ac); \draw[->] (ra) -- (ab);
+  \node[font=\scriptsize, align=center] at (0,0.3) {(a) round start:\\ root only,\\ CVPN priors};
+
+  % panel (b)
+  \node[p1] (rb) at (5.0,3.0) {P1};
+  \node[stub] (bc) at (3.9,1.6) {chk};
+  \node[p2]  (bb) at (5.9,1.6) {P2};
+  \draw[->] (rb) -- node[el]{c} (bc); \draw[->] (rb) -- node[el]{b} (bb);
+  \node[p1]   (bbf) at (5.0,0.3) {P1};
+  \node[stub] (bbc) at (6.9,0.3) {call};
+  \draw[->] (bb) -- node[el]{b6} (bbf); \draw[->] (bb) -- node[el]{chk} (bbc);
+  \node[font=\scriptsize, align=center] at (5.3,-0.9) {(b) EXPAND: the bet spine is\\ realized; check stays a stub};
+
+  % panel (c)
+  \node[p1] (rc) at (10.8,3.0) {P1};
+  \node[accent, font=\tiny, align=left, anchor=west] at (11.3,3.1) {$\sigma^\ast$: chk .52,\\ bet .48};
+  \node[done] (cc) at (9.7,1.6) {chk};
+  \node[p2]  (cb) at (11.7,1.6) {P2};
+  \draw[->] (rc) -- (cc); \draw[->] (rc) -- (cb);
+  \node[p1]   (cbf) at (10.8,0.3) {P1};
+  \node[done] (cbc) at (12.7,0.3) {call};
+  \draw[->] (cb) -- (cbf); \draw[->] (cb) -- (cbc);
+  \node[font=\scriptsize, align=center] at (11.1,-0.9) {(c) REGRET: CFR balances\\ the realized tree};
+\end{tikzpicture}
+\end{center}
+
+\textbf{Round start (a) --- the tree is a stub.} The only realized node is the
+root: P1 to act, pot 6, uniform beliefs. Its two actions are not yet expanded
+into children; instead the CVPN, queried at the root PBS, attaches a
+\emph{policy prior} $\hat\pi$ and a counterfactual value to each. Say
+$\hat\pi=(\text{check }.35,\ \text{bet }.65)$ --- the net's hunch that betting is
+the busier branch here.
+
+\textbf{EXPAND (b) --- the AlphaZero move.} To choose \emph{where} to add a node,
+PoG descends by the PUCT score, exactly AlphaZero's selection rule:
+\[
+  \mathrm{score}(a)\;=\;\underbrace{Q(a)}_{\text{value so far}}
+  \;+\; c\cdot\hat\pi(a)\cdot\frac{\sqrt{\textstyle\sum_b N(b)}}{1+N(a)} .
+\]
+With every visit count $N$ still zero the bonus is pure prior, so the \emph{bet}
+branch is realized first: a P2 node appears, the CVPN is queried there for its
+children's priors and values, and the next expansion descends again into P2's
+highest-scoring reply. After $E$ expansions only a thin spine exists --- the
+lines the prior thought were live --- while \emph{check} remains an unrealized
+stub, valued wholesale by its CVPN counterfactual value. Nothing built the dense
+both-branches-to-the-bottom tree ReBeL paid for.
+
+\textbf{REGRET (c) --- the CFR move.} Now run the CFR sweeps over \emph{whatever
+tree currently exists}. Every realized internal node carries per-hand regret
+tables; every leaf --- a CVPN stub or a fold terminal --- supplies per-hand
+values (the stub's from the net, belief-aware, re-priced each sweep exactly as in
+ReBeL). Regret matching at the root slides P1's \emph{actual} play from the
+prior's $.65$ bet toward whatever this tree's values justify --- here $.48$ ---
+balancing the range so P2 stays indifferent. The prior proposed \emph{where to
+look}; CFR decided \emph{what to play}.
+
+\textbf{Alternate, and the tree thickens where it matters.} The next round's
+expansions use the freshly updated visits and values, so nodes accrete on the
+branches CFR keeps returning to while the perpetually-ignored lines stay stubs.
+Over many rounds the realized tree is a sparse skeleton hugging the relevant
+lines --- the structure that lets the same code survive chess's thirty-way
+branching, where ReBeL's build-it-all step is a non-starter.
+
+\begin{intuition}
+\textbf{Two solvers, one tree, divided by question.} The expansion loop is
+AlphaZero asking \emph{``which branch is worth a node?''} --- visit- and
+prior-driven, argmax-flavoured. The regret loop is CFR asking \emph{``what
+frequencies here are unexploitable?''} --- mixing, regret-driven. They share the
+one growing public tree. Delete the expansion loop and you are back to ReBeL's
+dense subgame; delete the regret loop and you are back to AlphaZero, exploitable
+the instant hidden information matters.
 \end{intuition}
 
 \subsection{What a node of the search tree actually is}
@@ -1225,6 +1320,108 @@ net originally returned --- those become its regression targets (and the
 deeper solves may query new leaves, which re-enter the buffer with decaying
 probability: a self-improvement ladder in which the network forever chases
 its own deeper searches).
+
+\subsection{What the CVPN actually sees and says}
+
+As with ReBeL, the input/output shape \emph{is} the method --- with one revealing
+twist. ReBeL used \emph{two separate} networks ($\theta_v$ for leaf values,
+$\theta_\pi$ for warm-start priors). PoG fuses them into \textbf{one network with
+two heads}, exactly AlphaZero's value-plus-policy trunk:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.2mm]},
+  box/.style={rectangle, rounded corners=1.5mm, thick, align=center, font=\scriptsize, minimum height=12mm}]
+  \node[box, draw=memO, fill=orange!10, minimum width=33mm] (in) at (0,0)
+    {PBS in:\\ board, pot, bets\\ \emph{both} belief vectors};
+  \node[box, draw=villR, fill=red!5, minimum width=20mm] (net) at (4.7,0)
+    {CVPN\\ shared trunk};
+  \node[box, draw=accent, fill=blue!6, minimum width=42mm] (v) at (10.2,1.05)
+    {head 1 --- \emph{values} per hand,\\ both players (used at search leaves)};
+  \node[box, draw=heroG, fill=heroG!10, minimum width=42mm] (p) at (10.2,-1.05)
+    {head 2 --- \emph{policy prior} per hand\\ (steers where the tree grows)};
+  \draw[->, very thick] (in) -- (net);
+  \draw[->, very thick] (net.east) -- (v.west);
+  \draw[->, very thick] (net.east) -- (p.west);
+  \node[font=\scriptsize\itshape, align=center] at (4.7,-1.75)
+    {chess: beliefs collapse to a\\ point mass $\Rightarrow$ AlphaZero's two heads};
+\end{tikzpicture}
+\end{center}
+
+\textbf{Why fuse what ReBeL split?} Both outputs are functions of the same PBS,
+so a shared trunk is natural --- and, decisively, in PoG the policy head is
+\emph{load-bearing}: it steers tree growth (the PUCT prior), not merely a warm
+start, so it must be as good as the value head and is worth training jointly.
+ReBeL kept its two apart because its signals are genuinely different --- the value
+net learns by \emph{regression} onto solve outputs, the policy net by
+\emph{distillation} of average strategies --- and its policy net is only an
+accelerator the search may overrule. Same two quantities; different division of
+labour.
+
+\textbf{The degeneration test, in I/O terms.} Set the game to chess: the belief
+vector is a point mass (one world state, probability $1$), so the ``per-hand''
+value vector collapses to a single scalar and the ``per-hand'' prior to a single
+move distribution --- and the CVPN \emph{is} AlphaZero's
+$(\text{value},\,\text{policy})$ net, bit for bit. Hidden-information generality
+costs nothing when the hand is public; that collapse is the whole content of
+``one algorithm''.
+
+\subsection{Two phrases unpacked}
+
+\textbf{``Grows a sparse tree'' --- by what rule, exactly?} The same PUCT
+selection AlphaZero uses, with one swap. Visits flow to actions scoring high on
+$Q(a)+c\,\hat\pi(a)\sqrt{\sum_b N(b)}/(1+N(a))$ --- high prior, high value so far,
+few visits spent. The swap: the $Q(a)$ feeding that score is \emph{not} an MCTS
+average of rollout returns; it is the value of $a$ under the \emph{CFR solution of
+the current tree} --- belief-aware, mixed, sound. Growth is steered by
+AlphaZero's bandit arithmetic but fed by CFR's values, which is why expanding the
+tree never quietly biases it toward a single deterministic line the way pure MCTS
+would.
+
+\textbf{``Sound'' --- a guarantee about what?} Precisely this: with a
+bounded-error CVPN, GT-CFR's exploitability is bounded and \emph{shrinks as the
+tree grows}. That is the imperfect-information analogue of ``searching one ply
+deeper cannot hurt.'' The contrast that gives it teeth: in imperfect information
+\emph{plain MCTS has no such property} --- more visits make its play more
+deterministic (Q2 below), which can make it \emph{more} exploitable. ``Sound'' is
+exactly the guarantee MCTS forfeits the moment hidden information appears, and the
+one GT-CFR buys back by doing its searching with CFR.
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]},
+  act/.style={rectangle, rounded corners=1.5mm, draw=accent, fill=blue!6, thick, align=center, font=\scriptsize, minimum height=8mm},
+  buf/.style={rectangle, rounded corners=1.5mm, draw=memO, fill=orange!10, thick, align=center, font=\scriptsize, minimum height=8mm},
+  tr/.style={rectangle, rounded corners=1.5mm, draw=villR, fill=red!5, thick, align=center, font=\scriptsize, minimum height=8mm}]
+  \node[act] (a) at (0,0) {actor plays,\\ small search budget};
+  \node[buf] (b) at (4.4,0) {query buffer:\\ each trusted leaf PBS};
+  \node[tr]  (c) at (9.1,0) {trainer re-solves it\\ with a \emph{larger} budget};
+  \node[act, draw=heroG, fill=heroG!12] (d) at (9.1,-2.1) {sharper value target\\ $\Rightarrow$ refit CVPN};
+  \draw[->, thick] (a) -- node[above, font=\tiny]{log leaves} (b);
+  \draw[->, thick] (b) -- node[above, font=\tiny]{pop} (c);
+  \draw[->, thick] (c) -- (d);
+  \draw[->, thick, heroG] (d.west) .. controls (3.2,-2.1) and (0,-1.2) ..
+      node[below, font=\tiny, pos=0.55]{better net $\Rightarrow$ better next search} (a.south);
+  \draw[->, dashed, memO] (c.north) .. controls (11.1,1.5) and (6.7,1.5) ..
+      node[above, font=\tiny]{deeper solves spawn new leaves (decaying prob.)} (b.north);
+\end{tikzpicture}
+\end{center}
+
+The query buffer is what \emph{earns} the bounded error. Every leaf the actor's
+modest search trusted is logged; the trainer re-solves it with a larger budget,
+returns a sharper value, and the net regresses toward it --- and those deeper
+solves query their \emph{own} leaves, which re-enter the buffer with decaying
+probability. The network forever chases values produced by more search than it
+was allowed at play time: a ladder whose every rung is ``be right where you were
+relied upon''.
+
+\begin{trap}
+\textbf{Soundness is conditional, and the bill is the belief vector.} Two caveats
+travel together. First, the guarantee is \emph{given} bounded value error --- a
+CVPN that generalizes badly to an unseen PBS breaks the premise, not merely the
+play. Second, PoG inherits ReBeL's entry fee: it must write down a belief vector
+per public state, so a game with astronomically many private states, or no clean
+notion of ``public state'', is out of reach. ``One algorithm for chess, Go and
+poker'' is not ``one algorithm for every game''.
+\end{trap}
 
 \subsection{Close-up: the two questions everyone asks}
 
@@ -1337,6 +1534,75 @@ treating the history as an opaque flat vector --- the same lesson, in
 convolutional form, that pushed this project from a flat 816-dim input to a
 token sequence.
 
+\subsection{One observation under the microscope: the two tensors}
+
+Because ``the data shapes are the method'' here too, it pays to encode one
+concrete situation by hand. Hero holds $A\spadesuit K\spadesuit$; the flop is
+$K\diamondsuit\,7\spadesuit\,2\clubsuit$. The card stream lays this on a
+$4\times13$ grid (suit $\times$ rank), lighting one cell per known card:
+
+\begin{center}
+\begin{tikzpicture}[font=\scriptsize, x=6.4mm, y=6.4mm]
+  \foreach \r in {0,1,2,3} \foreach \c in {0,...,12}
+     \draw[black!18] (\c,\r) rectangle ++(1,1);
+  \foreach \c/\lab in {0/2,1/3,2/4,3/5,4/6,5/7,6/8,7/9,8/T,9/J,10/Q,11/K,12/A}
+     \node[font=\tiny] at (\c+0.5,4.4) {\lab};
+  \foreach \r/\lab in {3/$\spadesuit$,2/$\heartsuit$,1/$\diamondsuit$,0/$\clubsuit$}
+     \node at (-0.5,\r+0.5) {\lab};
+  % hero hole (green): A spade (12,3), K spade (11,3)
+  \fill[heroG!55] (12,3) rectangle ++(1,1);
+  \fill[heroG!55] (11,3) rectangle ++(1,1);
+  % board (orange): K diamond (11,1), 7 spade (5,3), 2 club (0,0)
+  \fill[memO!60] (11,1) rectangle ++(1,1);
+  \fill[memO!60] (5,3)  rectangle ++(1,1);
+  \fill[memO!60] (0,0)  rectangle ++(1,1);
+  \foreach \c/\r in {12/3,11/3,11/1,5/3,0/0} \draw[black!45] (\c,\r) rectangle ++(1,1);
+  % K-column highlight
+  \draw[villR, very thick, rounded corners=1pt] (10.94,0.94) rectangle (12.06,4.06);
+  % spade-row highlight
+  \draw[accent, very thick, rounded corners=1pt] (-0.06,2.94) rectangle (13.06,4.06);
+  % annotations
+  \node[villR, font=\tiny, align=left, anchor=west] at (13.4,2.3)
+     {K column lit in two rows\\ $=$ \textbf{top pair}\\ (K$\spadesuit$ hole, K$\diamondsuit$ board)};
+  \node[accent, font=\tiny, align=left, anchor=west] at (13.4,3.7)
+     {three in the $\spadesuit$ row\\ $=$ \textbf{flush texture}};
+  % legend
+  \fill[heroG!55] (0,-1.0) rectangle ++(0.7,0.7); \node[font=\tiny, anchor=west] at (0.8,-0.65){your hole};
+  \fill[memO!60] (3.0,-1.0) rectangle ++(0.7,0.7); \node[font=\tiny, anchor=west] at (3.8,-0.65){board};
+\end{tikzpicture}
+\end{center}
+
+Read the grid the way a convolution does. The made pair is \emph{two cells
+sharing a column} (K of two suits); the flush texture is \emph{mass along one
+row} (three spades); a straight draw would be a \emph{run of adjacent columns};
+a paired board, two cells in one column. Every poker-relevant pattern is a
+\emph{local} shape on this grid --- precisely what small kernels detect cheaply,
+and precisely why the cards are planes and not a flat list. One group of planes
+per street (hole, flop, turn, river) keeps ``when'' alongside ``what''.
+
+The action stream is the second eye. It encodes, per street and per player, which
+action was taken and the normalized bet size, again as planes, so the same
+convolutional machinery reads betting \emph{patterns} rather than an opaque flat
+history:
+
+\begin{center}
+\begin{tikzpicture}[font=\scriptsize, x=15mm, y=6.2mm]
+  \node[font=\tiny] at (0.5,4.35) {P1};
+  \node[font=\tiny] at (1.5,4.35) {P2};
+  \foreach \r/\lab in {3/pre,2/flop,1/turn,0/river}
+     \node[font=\tiny, anchor=east] at (-0.06,\r+0.5) {\lab};
+  \foreach \r in {0,1,2,3} \foreach \c in {0,1}
+     \draw[black!18] (\c,\r) rectangle ++(1,1);
+  \fill[accent!12] (0,3) rectangle ++(2,1);
+  \node[font=\tiny] at (0.5,3.5) {raise 2.5}; \node[font=\tiny] at (1.5,3.5) {call};
+  \node[font=\tiny] at (0.5,2.5) {bet .5p};   \node[font=\tiny] at (1.5,2.5) {call};
+  \node[font=\tiny] at (0.5,1.5) {check};     \node[font=\tiny] at (1.5,1.5) {check};
+  \node[font=\tiny] at (0.5,0.5) {bet 1p};    \node[font=\tiny] at (1.5,0.5) {--};
+  \node[font=\tiny, anchor=west, align=left] at (2.25,2.0)
+     {same grid logic: a ``raise--raise''\\ texture becomes a local pattern\\ the conv can name, not an opaque\\ flat history --- this is the implicit\\ channel through which the net infers\\ the opponent's range};
+\end{tikzpicture}
+\end{center}
+
 \subsection{Making PPO survive poker}
 
 Vanilla PPO collapses on poker: rewards span $\pm$200 big blinds with brutal
@@ -1357,6 +1623,56 @@ def trinal_clip_losses(ratio, adv, v_pred, v_target, eps, d1, d2, d3):
     return policy_loss, value_loss
 \end{lstlisting}
 
+Numbers make the two failure modes concrete. Take a rare line --- the new policy
+makes it $8\times$ likelier than the old, so the importance ratio is $\rho=8$ ---
+that turned out badly: advantage $A=-150$\,bb.
+
+\textbf{Clip 1 (policy ratio, the $\delta_1$ cap).} The surrogate weights the
+update by $\rho\cdot A$. Left unbounded, that single rare transition contributes
+$8\times(-150)=-1200$ to the objective --- a gradient spike that swamps the
+hundreds of ordinary transitions sharing the batch. Standard PPO's
+$[1{-}\epsilon,\,1{+}\epsilon]$ band does not rescue the \emph{negative}-advantage
+side; the extra upper cap $\delta_1$ does, by refusing to let $\rho$ count for
+more than $\delta_1$ there. The heavy right tail of the ratio histogram is simply
+truncated.
+
+\textbf{Clips 2--3 (value target, the reachable band).} A bootstrapped value
+target can overshoot what the hand can physically pay. If only $120$\,bb is live
+(the pot plus the stacks that can still go in), a regression target of $+400$ is
+an impossibility the critic should never chase. Clipping the target to
+$[-d_2,\,d_3]=[-120,\,+120]$ --- max losable, max winnable \emph{this} hand ---
+keeps value learning inside what the chips allow.
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]}]
+  % policy-ratio axis
+  \draw[->, thick] (0,1.7) -- (9.4,1.7); \node[font=\scriptsize, anchor=west] at (9.5,1.7) {ratio $\rho$};
+  \foreach \x in {1.2,2.4,3.6,6.0} \draw (\x,1.6)--(\x,1.8);
+  \node[font=\tiny] at (1.2,2.02){$1{-}\epsilon$}; \node[font=\tiny] at (2.4,2.02){$1$};
+  \node[font=\tiny] at (3.6,2.02){$1{+}\epsilon$}; \node[font=\tiny] at (6.0,2.02){$\delta_1$};
+  \fill[heroG!25] (1.2,1.62) rectangle (3.6,1.78);
+  \node[font=\tiny, heroG, anchor=west] at (1.1,1.42) {standard band ($A\ge0$)};
+  \draw[memO, very thick] (3.6,1.7) -- (6.0,1.7);
+  \node[font=\tiny, memO, anchor=west] at (3.7,2.34) {extra cap when $A<0$};
+  \node[villR, font=\tiny, anchor=west] at (6.55,1.7) {$\rho{=}8$ clamped to $\delta_1$};
+  \draw[->, villR] (6.9,1.54) .. controls (6.6,1.02) .. (6.02,1.62);
+  % value axis
+  \draw[->, thick] (0,-0.5) -- (9.4,-0.5); \node[font=\scriptsize, anchor=west] at (9.5,-0.5) {value target (bb)};
+  \foreach \x in {2.0,5.5} \draw (\x,-0.6)--(\x,-0.4);
+  \node[font=\tiny] at (2.0,-0.84){$-d_2$}; \node[font=\tiny] at (5.5,-0.84){$+d_3$};
+  \fill[heroG!25] (2.0,-0.58) rectangle (5.5,-0.42);
+  \node[font=\tiny, heroG] at (3.75,-0.18) {chips reachable this hand};
+  \node[villR, font=\tiny, anchor=west] at (6.35,-0.5) {$+400$ clipped to $+d_3$};
+  \draw[->, villR] (6.7,-0.66) .. controls (6.3,-1.06) .. (5.55,-0.58);
+\end{tikzpicture}
+\end{center}
+
+Both clips encode the same physical fact: the chips on the table bound every
+learning target. The ratio cap bounds the policy update's reach on a rare line;
+the value band bounds the critic's target to what the pot can pay. Poker's heavy
+tails are real money, not noise to average away --- but they are finite, and that
+finiteness is exactly where it is safe to clip.
+
 \subsection{K-best self-play against strategy cycling}
 
 Naive self-play (always train against the latest self) famously
@@ -1376,6 +1692,108 @@ while training:
         update(learner, trinal_clip_ppo(rollouts))
     pool = top_k(pool + [learner], K, by=elo)   # survival of the fittest
 \end{lstlisting}
+
+\subsection{The cycle under the microscope: rock--paper--scissors in strategy space}
+
+Q2 below names the disease; a picture makes it unforgettable. Three self-play
+checkpoints can chase each other in a directed cycle --- $B$ beats $A$, $C$ beats
+$B$, and $A$ beats $C$ --- so head-to-head ``progress'' is a carousel, not a
+climb. A naive rating, which only ever sees the latest pairwise result, marches
+upward the whole time:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2.4mm]},
+  ag/.style={circle, draw=accent, fill=blue!8, thick, minimum size=9mm, font=\scriptsize},
+  el/.style={font=\tiny, fill=white, inner sep=0.5pt}]
+  \node[ag] (A) at (90:1.55) {$A$};
+  \node[ag] (B) at (210:1.55) {$B$};
+  \node[ag] (C) at (330:1.55) {$C$};
+  \draw[->, very thick, villR] (B) to[bend left=10] node[el]{beats} (A);
+  \draw[->, very thick, villR] (C) to[bend left=10] node[el]{beats} (B);
+  \draw[->, very thick, villR] (A) to[bend left=10] node[el]{beats} (C);
+  \node[font=\tiny, align=center] at (0,-0.05) {a cycle:\\ no winner};
+  \begin{scope}[xshift=6.0cm, yshift=-0.2cm]
+    \draw[->, thick] (0,-1.4) -- (4.2,-1.4) node[right, font=\scriptsize]{training};
+    \draw[->, thick] (0,-1.4) -- (0,1.5);
+    \draw[very thick, heroG] (0,-1.1) -- (3.9,1.2);
+    \node[heroG, font=\tiny, anchor=west] at (1.45,0.5) {naive Elo (climbs)};
+    \draw[very thick, villR, dashed] (0,-0.35) -- (3.9,-0.3);
+    \node[villR, font=\tiny, anchor=west] at (1.15,-0.78) {true exploitability (flat)};
+  \end{scope}
+\end{tikzpicture}
+\end{center}
+
+The fix is to make ``entering the pool'' demand strength against a \emph{spread}
+of past styles at once --- a crude integral over the orbit rather than a single
+point on it. Each new learner trains against, and is rated against, the $K$ best
+historical agents; it joins the pool only if its Elo clears the bar:
+
+\begin{center}
+\begin{tikzpicture}[font=\small, >={Stealth[length=2mm]},
+  slot/.style={rectangle, rounded corners=1mm, draw=accent, fill=blue!8, thick, minimum width=10mm, minimum height=7mm, font=\scriptsize, align=center}]
+  \node[font=\scriptsize\bfseries] at (3.0,1.25) {$K$-best pool (ranked by Elo)};
+  \node[slot] (s1) at (0,0)   {\#1};
+  \node[slot] (s2) at (1.5,0) {\#2};
+  \node[slot] (s3) at (3.0,0) {\#3};
+  \node[font=\small] at (4.2,0) {$\cdots$};
+  \node[slot] (sk) at (5.4,0) {\#$K$};
+  \node[slot, draw=heroG, fill=heroG!12] (L) at (2.7,-2.1) {learner};
+  \draw[->, thick, heroG] (s1) -- (L);
+  \draw[->, thick, heroG] (s3) -- (L);
+  \draw[->, thick, heroG] (sk) -- (L);
+  \node[font=\tiny, heroG, anchor=west] at (3.7,-1.15) {train vs a \emph{mix} of the $K$};
+  \draw[->, thick, villR, dashed] (L.east) .. controls (7.2,-2.1) and (7.2,0) ..
+      node[right, font=\tiny, align=left, pos=0.5]{enters only if its\\ Elo clears the bar} (sk.east);
+\end{tikzpicture}
+\end{center}
+
+This is the same medicine AlphaStar's league used at industrial scale, and ---
+as Q2 argues --- it is really CFR's averaging theorem smuggled back in through the
+opponent distribution: you cannot carry an explicit average strategy, so you force
+the \emph{opponents} to be an average instead.
+
+\subsection{Two phrases unpacked}
+
+\textbf{``Pseudo-Siamese'' --- twins, but not identical.} A true Siamese network
+runs \emph{one} set of weights over two inputs of the \emph{same} kind (two faces,
+say) to compare them. AlphaHoldem's two streams share only the \emph{shape} --- a
+small ConvNet over a grid --- not the \emph{weights}, because their grids mean
+different things: a kernel that learned to read a flush draw as mass along a suit
+row would be nonsense slid across the action-history planes, whose axes are
+streets and players. ``Pseudo'' is the admission that the symmetry is
+architectural, not semantic --- structurally twinned feature extractors,
+separately trained.
+
+\textbf{``End-to-end'' --- what was deleted, and what stands in.} Lay the volume's
+machinery beside AlphaHoldem and read off the subtractions:
+
+\begin{itemize}[leftmargin=1.4em, itemsep=2pt]
+\item \textbf{ranges / beliefs --- gone.} No PBS, no infoset enumeration. The
+  action-history ConvNet must \emph{implicitly} infer ``what does the opponent's
+  range look like'' from the betting planes alone.
+\item \textbf{the search tree --- gone.} No subgame, no CFR-at-play-time. The
+  single forward pass \emph{is} the decision (2.9\,ms, Results below).
+\item \textbf{regret and averaging --- gone.} No explicit average strategy. The
+  PPO gradient plus the K-best pool stand in for CFR's averaging theorem, as the
+  cycle picture above makes literal.
+\end{itemize}
+
+And yet poker knowledge does not vanish --- it relocates. The value clip's
+reachable band, the $4\times13$ card geometry, the per-street action planes, the
+K-best schedule: each is domain-specific scaffolding doing work that CFR's
+structure used to do for free. ``End-to-end'' describes the unbroken gradient path
+from observation to action, not an absence of poker priors.
+
+\begin{trap}
+\textbf{``End-to-end'' hides its inductive biases in the plumbing.} It is tempting
+to read AlphaHoldem as ``just let SGD figure out poker''. But the encodings and
+the clips \emph{are} the priors that make the gradient well-behaved; swap the card
+grid for a flat vector, or drop the reachable-chips value clip, and the same PPO
+diverges. The lesson for this project is the mirror image of its own history: the
+move from a flat 816-dim input to a token sequence was exactly this kind of
+inductive-bias engineering, and it mattered every bit as much as the learning
+rule.
+\end{trap}
 
 \subsection{Close-up: the two questions everyone asks}
 
