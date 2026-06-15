@@ -250,7 +250,7 @@ class MatchController extends ChangeNotifier {
   /// seat is to act and we are not mid-network-call).
   bool get awaitingHumanInput {
     final s = _session;
-    if (s == null || s.isTerminal) return false;
+    if (s == null || s.isTerminal || _error != null) return false;
     final p = s.tableState.toAct;
     if (p == null) return false;
     if (!isSlumbotMatch) return s.agentFor(p) is HumanAgent;
@@ -325,8 +325,14 @@ class MatchController extends ChangeNotifier {
   }
 
   Future<void> _slumbotLocalAct(int legalIdx) async {
+    // Re-entrancy / stale-tap guard. A fast double-tap (before the action bar
+    // is disabled), a tap arriving after Slumbot's reply changed the state, or
+    // a stale legal index would otherwise apply a now-illegal action to the
+    // mirror engine and throw. Only act when it is genuinely our turn.
+    if (_pending || !_handStarted || session.isTerminal || _error != null) return;
+    if (session.tableState.toAct != _localSeat) return;
     final obs = session.observation;
-    if (obs == null) return;
+    if (obs == null || legalIdx < 0 || legalIdx >= obs.legal.length) return;
     final type = obs.legal[legalIdx];
     final sizing = obs.sizingForLegal(legalIdx);
     final toCall = session.tableState.toCallChips;
@@ -372,14 +378,25 @@ class MatchController extends ChangeNotifier {
       final street = session.tableState.street; // the round this action is in
       final label = _bubbleTokenLabel(a);     // computed from pre-apply state
       _bubbleStreetGate(street);               // a new round? drop the old labels
-      switch (a) {
-        case SbFold():
-          session.applyActionDirect(ActionType.fold);
-        case SbCheck():
-        case SbCall():
-          session.applyActionDirect(ActionType.checkCall);
-        case SbBet(:final toChips):
-          session.applyRaiseToDirect(toChips);
+      try {
+        switch (a) {
+          case SbFold():
+            session.applyActionDirect(ActionType.fold);
+          case SbCheck():
+          case SbCall():
+            session.applyActionDirect(ActionType.checkCall);
+          case SbBet(:final toChips):
+            session.applyRaiseToDirect(toChips);
+        }
+      } on StateError {
+        // The cosmetic mirror diverged from Slumbot on a rare replay edge
+        // (Slumbot is authoritative — the engine is only re-deriving the table
+        // for display). Don't crash the match: stop replaying this hand, flag
+        // it, and let the user start a fresh one. If the hand is in fact over,
+        // the handOver block below still banks Slumbot's reported result.
+        _error = 'Table display lost sync with Slumbot — tap “New hand”.';
+        _appliedTokens = tokens.length;
+        break;
       }
       if (actor != null) _bubbles[actor] = label;
       _appliedTokens = i + 1;
