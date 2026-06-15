@@ -87,18 +87,19 @@ class SlumbotClient {
   final http.Client _http;
   final String baseUrl;
 
-  /// Persistent login token (for Slumbot-side stats). Anonymous play (the only
-  /// mode implemented) leaves it empty, so `new_hand` is called with no token
-  /// — which is REQUIRED: feeding a finished hand's token back into `new_hand`
-  /// makes Slumbot return a tokenless/auth-failed response. A future login flow
-  /// would thread this in via the constructor.
+  /// Persistent login token (for Slumbot-side stats); empty for anonymous play.
+  /// A future login flow would thread this in via the constructor.
   final String _loginToken;
 
-  /// Per-hand token from the latest `new_hand`, rotated by each `act`. Used
-  /// only for that hand's `act` calls — NOT passed to the next `new_hand`.
-  String _handToken = '';
+  /// The single session token Slumbot hands back, rotated by every `new_hand`
+  /// AND every `act`. It is carried FORWARD into the next `new_hand` — that is
+  /// what makes Slumbot ALTERNATE the button each hand. Starting a hand WITHOUT
+  /// a token always seats Slumbot as the button, so Slumbot acts first every
+  /// hand (verified live: tokenless new_hand ⇒ client_pos always 0; carrying
+  /// the token ⇒ client_pos alternates). Empty until the first reply.
+  String _sessionToken = '';
 
-  String get handToken => _handToken;
+  String get handToken => _sessionToken;
 
   SlumbotClient({
     http.Client? httpClient,
@@ -109,18 +110,29 @@ class SlumbotClient {
 
   void dispose() => _http.close();
 
-  /// Start a fresh hand. Anonymous unless a login token is present.
+  /// Start a fresh hand, carrying the session token forward so Slumbot
+  /// alternates the button. If Slumbot rejects the carried token, fall back to
+  /// a tokenless `new_hand` so play never hard-fails — that fallback is the old
+  /// always-anonymous behaviour (Slumbot simply takes the button again).
   Future<SlumbotResponse> newHand() async {
-    final r = await _post(
-        'new_hand', {if (_loginToken.isNotEmpty) 'token': _loginToken});
-    _handToken = r.token;
+    final carried = _sessionToken.isNotEmpty ? _sessionToken : _loginToken;
+    SlumbotResponse r;
+    try {
+      r = await _post('new_hand', {if (carried.isNotEmpty) 'token': carried});
+    } on SlumbotException {
+      if (carried.isEmpty) rethrow;
+      _sessionToken = '';
+      r = await _post(
+          'new_hand', {if (_loginToken.isNotEmpty) 'token': _loginToken});
+    }
+    if (r.token.isNotEmpty) _sessionToken = r.token;
     return r;
   }
 
   /// Send the client's incremental action (e.g. "b300", "c", "k", "f").
   Future<SlumbotResponse> act(String incr) async {
-    final r = await _post('act', {'token': _handToken, 'incr': incr});
-    if (r.token.isNotEmpty) _handToken = r.token;
+    final r = await _post('act', {'token': _sessionToken, 'incr': incr});
+    if (r.token.isNotEmpty) _sessionToken = r.token;
     return r;
   }
 
