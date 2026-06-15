@@ -257,6 +257,9 @@ PYBIND11_MODULE(pokertrainer_engine, m) {
         .def("observation",   &pt::Env::observation)
         .def("step",          &pt::Env::step, py::arg("legal_action_idx"))
         .def("step_action",   &pt::Env::step_action, py::arg("action"))
+        .def("step_raise_to", &pt::Env::step_raise_to, py::arg("bet_to_chips"),
+             "Raise to an explicit chip target (mirrors the FFI path the UI "
+             "uses for Slumbot's arbitrary bet sizes).")
         .def("state",         &pt::Env::state, py::return_value_policy::reference_internal)
         .def("is_terminal",   &pt::Env::is_terminal)
         .def("to_act",        &pt::Env::to_act)
