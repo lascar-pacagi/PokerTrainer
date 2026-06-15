@@ -281,27 +281,46 @@ class GameSession extends ChangeNotifier {
       );
     }
 
-    // Showdown: read the full board + both holes and run hand eval.
+    // Showdown: read the full board + both holes and run hand eval. The WINNER
+    // is taken from this evaluation (lower engine rank = better hand, the same
+    // convention computeEquity uses), NOT from the engine's frozen payoffChips.
+    // Why: in the Slumbot mirror the opponent's hole cards are injected only
+    // AFTER the betting closes, so the engine settles the showdown while the
+    // opponent still holds NO_CARD and can award the pot to the wrong seat —
+    // which surfaced as "my pair beats Slumbot's flush". The chip transfer is
+    // card-independent, so the pot magnitude stays reliable; only the direction
+    // needs re-deriving from the revealed cards. For the Inspector (engine dealt
+    // both hands, settled correctly) this reproduces payoffChips exactly.
     final sb    = env.getHole(Player.sb);
     final bb    = env.getHole(Player.bb);
     final board = env.getBoard();
     String? sbCat, bbCat;
+    Player? sdWinner = winner;
+    double sbOut = sbDelta, bbOut = bbDelta;
     if (sb.every((c) => c != EngineCard.noCard) &&
         bb.every((c) => c != EngineCard.noCard) &&
         board.every((c) => c != EngineCard.noCard)) {
       final ranks = _evalShowdown(sb, bb, board);
       sbCat = rankCategory(engine, ranks.sb);
       bbCat = rankCategory(engine, ranks.bb);
+      final pot = sbDelta.abs() > bbDelta.abs() ? sbDelta.abs() : bbDelta.abs();
+      if (ranks.sb == ranks.bb) {
+        sdWinner = null;  sbOut = 0;     bbOut = 0;      // chop
+      } else if (ranks.sb < ranks.bb) {
+        sdWinner = Player.sb;  sbOut = pot;  bbOut = -pot; // SB's hand wins
+      } else {
+        sdWinner = Player.bb;  sbOut = -pot; bbOut = pot;  // BB's hand wins
+      }
     }
 
     return TerminalSummary(
       reason: Terminal.showdown,
-      winner: winner,
-      winAmountBb: winner == null
+      winner: sdWinner,
+      winAmountBb: sdWinner == null
           ? 0
-          : (winner == Player.sb ? sbDelta : bbDelta),
-      sbDeltaBb: sbDelta,
-      bbDeltaBb: bbDelta,
+          : (sdWinner == Player.sb ? sbOut : bbOut),
+      sbDeltaBb: sbOut,
+      bbDeltaBb: bbOut,
       sbHandCategory: sbCat,
       bbHandCategory: bbCat,
     );
