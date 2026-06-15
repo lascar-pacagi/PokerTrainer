@@ -56,6 +56,10 @@ class _PlayScreenState extends State<PlayScreen> {
           children: [
             _controlRow(),
             const SizedBox(height: 10),
+            if (_match.isSlumbotMatch) ...[
+              _slumbotInfoNote(),
+              const SizedBox(height: 8),
+            ],
             if (_match.error != null) _errorBanner(_match.error!),
             const SizedBox(height: 6),
             Expanded(
@@ -131,9 +135,12 @@ class _PlayScreenState extends State<PlayScreen> {
       spacing: 12,
       runSpacing: 8,
       children: [
-        _seatDropdown('Seat A', _match.seatA, (c) => _match.setSeat(isA: true, choice: c)),
+        // Labels match the table's seat names (SB bottom / BB top). In a local
+        // match these positions are fixed (SB acts first); in a Slumbot match
+        // they rotate each hand — see _slumbotInfoNote below.
+        _seatDropdown('SB', _match.seatA, (c) => _match.setSeat(isA: true, choice: c)),
         const Icon(Icons.sports_mma, size: 18),
-        _seatDropdown('Seat B', _match.seatB, (c) => _match.setSeat(isA: false, choice: c)),
+        _seatDropdown('BB', _match.seatB, (c) => _match.setSeat(isA: false, choice: c)),
         const SizedBox(width: 8),
         FilledButton.icon(
           onPressed: _match.pending ? null : () => _match.newHand(),
@@ -283,6 +290,30 @@ class _PlayScreenState extends State<PlayScreen> {
           borderRadius: BorderRadius.circular(8),
         ),
         child: Text(text, textAlign: TextAlign.center),
+      );
+
+  /// Slumbot is the authority: it deals and the button alternates each hand, so
+  /// the SB/BB seat labels rotate and the player can't choose a position. Shown
+  /// only in a Slumbot match (a local match has fixed SB=bottom / BB=top seats).
+  Widget _slumbotInfoNote() => Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+        decoration: BoxDecoration(
+          color: const Color(0x166FA8DC),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0x336FA8DC)),
+        ),
+        child: const Row(children: [
+          Icon(Icons.info_outline, size: 16, color: Color(0xFF9BD0FF)),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Slumbot deals and is the dealer: the button alternates every hand, '
+              'so who is SB/BB (and acts first) rotates automatically — you '
+              'don’t choose your seat against Slumbot.',
+              style: TextStyle(fontSize: 12, color: Color(0xDDEAE6D9)),
+            ),
+          ),
+        ]),
       );
 
   Widget _errorBanner(String text) => Container(
