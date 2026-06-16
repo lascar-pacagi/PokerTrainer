@@ -146,6 +146,33 @@ class MatchController extends ChangeNotifier {
   String? get error => _error;
   bool get handStarted => _handStarted;
 
+  // ─── desync diagnostics ──────────────────────────────────────────────────
+  // A rolling breadcrumb of recent mirror events — new hands, our taps (incl.
+  // rejected stale taps), Slumbot tokens, and the pre-apply engine state. On a
+  // replay desync we snapshot it into `diagnostic` (and debugPrint it) so the
+  // rare exact trigger can be reported. Cheap; only strings.
+  final List<String> _trail = [];
+  String? _diagnostic;
+  String? get diagnostic => _diagnostic;
+
+  void _trace(String s) {
+    _trail.add(s);
+    if (_trail.length > 30) _trail.removeRange(0, _trail.length - 30);
+  }
+
+  String _stateBrief() {
+    final t = session.tableState;
+    return 'st=${t.street} toAct=${t.toAct} tc=${t.toCallChips} '
+        'inv=${t.investedThisStreet} stk=${t.stacksChips} term=${t.isTerminal}';
+  }
+
+  String _tokBrief(SbAction a) => switch (a) {
+        SbFold() => 'fold',
+        SbCheck() => 'check',
+        SbCall() => 'call',
+        SbBet(:final toChips) => 'b$toChips',
+      };
+
   /// Pause between mirrored opponent actions so the user can follow the play.
   Duration replayPause = const Duration(milliseconds: 750);
 
@@ -269,6 +296,7 @@ class MatchController extends ChangeNotifier {
   /// Start a fresh hand.
   Future<void> newHand() async {
     _error = null;
+    _diagnostic = null;
     if (!isSlumbotMatch) {
       session.dealRandom(); // engine deals + auto-steps any Model seats
       notifyListeners();
@@ -300,6 +328,7 @@ class MatchController extends ChangeNotifier {
       // Position: client_pos==1 ⇒ client is SB/button (seat 0); ==0 ⇒ BB.
       _localSeat = resp.clientPos == 1 ? Player.sb : Player.bb;
       _slumbotSeat = _other(_localSeat);
+      _trace('NEWHAND cp=${resp.clientPos} local=$_localSeat act="${resp.action}"');
 
       session.beginMirrorHand();
       _clearBubbles();
@@ -329,15 +358,27 @@ class MatchController extends ChangeNotifier {
     // is disabled), a tap arriving after Slumbot's reply changed the state, or
     // a stale legal index would otherwise apply a now-illegal action to the
     // mirror engine and throw. Only act when it is genuinely our turn.
-    if (_pending || !_handStarted || session.isTerminal || _error != null) return;
-    if (session.tableState.toAct != _localSeat) return;
+    if (_pending || !_handStarted || session.isTerminal || _error != null) {
+      _trace('SKIP_TAP idx=$legalIdx pending=$_pending started=$_handStarted '
+          'term=${session.isTerminal} err=${_error != null}');
+      return;
+    }
+    if (session.tableState.toAct != _localSeat) {
+      _trace('SKIP_TAP idx=$legalIdx toAct=${session.tableState.toAct} local=$_localSeat');
+      return;
+    }
     final obs = session.observation;
-    if (obs == null || legalIdx < 0 || legalIdx >= obs.legal.length) return;
+    if (obs == null || legalIdx < 0 || legalIdx >= obs.legal.length) {
+      _trace('SKIP_TAP idx=$legalIdx legalN=${obs?.legal.length}');
+      return;
+    }
     final type = obs.legal[legalIdx];
     final sizing = obs.sizingForLegal(legalIdx);
     final toCall = session.tableState.toCallChips;
     final myStreet = session.tableState.street; // the round we are acting in
     final myLabel = _bubbleLabel(type, toCallChips: toCall, betToChips: sizing);
+    final incr = encodeAction(type, toCallChips: toCall, betToChips: sizing);
+    _trace('ME $incr (idx=$legalIdx $type) | ${_stateBrief()}');
 
     // Apply our action to the mirror first (instant UI feedback), then post.
     if (type == ActionType.fold || type == ActionType.checkCall) {
@@ -348,7 +389,6 @@ class MatchController extends ChangeNotifier {
     _bubbleStreetGate(myStreet);          // dropped stale labels if a new round
     _bubbles[_localSeat] = myLabel;
     _appliedTokens += 1;
-    final incr = encodeAction(type, toCallChips: toCall, betToChips: sizing);
 
     _pending = true;
     notifyListeners();
@@ -378,6 +418,7 @@ class MatchController extends ChangeNotifier {
       final street = session.tableState.street; // the round this action is in
       final label = _bubbleTokenLabel(a);     // computed from pre-apply state
       _bubbleStreetGate(street);               // a new round? drop the old labels
+      _trace('SRV ${_tokBrief(a)} | ${_stateBrief()}');
       try {
         switch (a) {
           case SbFold():
@@ -388,13 +429,19 @@ class MatchController extends ChangeNotifier {
           case SbBet(:final toChips):
             session.applyRaiseToDirect(toChips);
         }
-      } on StateError {
+      } on StateError catch (e) {
         // The cosmetic mirror diverged from Slumbot on a rare replay edge
         // (Slumbot is authoritative — the engine is only re-deriving the table
         // for display). Don't crash the match: stop replaying this hand, flag
         // it, and let the user start a fresh one. If the hand is in fact over,
         // the handOver block below still banks Slumbot's reported result.
-        _error = 'Table display lost sync with Slumbot — tap “New hand”.';
+        // Snapshot the breadcrumb trail so the (rare) exact trigger is capturable.
+        _trace('!! ENGINE REJECTED ${_tokBrief(a)} ($e)');
+        _diagnostic = 'Slumbot mirror desync · full action="${resp.action}"\n'
+            '${_trail.join("\n")}';
+        debugPrint('=== SLUMBOT MIRROR DESYNC ===\n$_diagnostic\n=============================');
+        _error = 'Table display lost sync with Slumbot — tap “New hand”. '
+            '(Diagnostic captured below / in the logs.)';
         _appliedTokens = tokens.length;
         break;
       }

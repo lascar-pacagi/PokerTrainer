@@ -7,6 +7,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../ffi/actions.dart';
 import '../ffi/engine.dart';
@@ -61,6 +62,10 @@ class _PlayScreenState extends State<PlayScreen> {
               const SizedBox(height: 8),
             ],
             if (_match.error != null) _errorBanner(_match.error!),
+            if (_match.diagnostic != null) ...[
+              const SizedBox(height: 6),
+              _diagnosticBox(_match.diagnostic!),
+            ],
             const SizedBox(height: 6),
             Expanded(
               child: Row(
@@ -314,6 +319,48 @@ class _PlayScreenState extends State<PlayScreen> {
             ),
           ),
         ]),
+      );
+
+  /// Selectable/copyable breadcrumb dump shown when the mirror reports a desync,
+  /// so the rare exact trigger can be reported back. Also printed to the logs.
+  Widget _diagnosticBox(String text) => Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0x22000000),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0x33FFFFFF)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              const Icon(Icons.bug_report_outlined, size: 14, color: Color(0x99EAE6D9)),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text('Desync diagnostic — select & copy to report:',
+                    style: TextStyle(fontSize: 11, color: Color(0x99EAE6D9))),
+              ),
+              IconButton(
+                tooltip: 'Copy diagnostic',
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.copy, size: 14),
+                onPressed: () => Clipboard.setData(ClipboardData(text: text)),
+              ),
+            ]),
+            const SizedBox(height: 4),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 160),
+              child: SingleChildScrollView(
+                child: SelectableText(
+                  text,
+                  style: const TextStyle(
+                      fontFamily: 'monospace', fontSize: 11, color: Color(0xCCEAE6D9)),
+                ),
+              ),
+            ),
+          ],
+        ),
       );
 
   Widget _errorBanner(String text) => Container(
