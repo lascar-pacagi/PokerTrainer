@@ -261,14 +261,25 @@ HandEvaluator HandEvaluator::load_or_generate(std::string_view /*tables_path*/) 
 }
 
 uint16_t HandEvaluator::evaluate5(const Card* cards) const {
+    // Guard against unset cards (NO_CARD=0xFF). `deck` has NUM_CARDS=52 entries,
+    // so deck[NO_CARD] would be an out-of-bounds read (UB). The Slumbot mirror
+    // can reach a showdown before the board/holes are injected (cards still
+    // NO_CARD); return the worst rank deterministically instead of reading OOB.
+    // Training/solve paths always pass full hands, so this never fires there.
+    for (int i = 0; i < 5; ++i)
+        if (cards[i] >= NUM_CARDS) return 7462;   // worst rank (1=best..7462=worst)
     return impl_->eval5_internal(
         impl_->deck[cards[0]], impl_->deck[cards[1]], impl_->deck[cards[2]],
         impl_->deck[cards[3]], impl_->deck[cards[4]]);
 }
 
 uint16_t HandEvaluator::evaluate7(const Card* cards) const {
+    // See evaluate5: an incomplete hand (any NO_CARD) ranks worst, no OOB read.
     uint32_t c[7];
-    for (int i = 0; i < 7; ++i) c[i] = impl_->deck[cards[i]];
+    for (int i = 0; i < 7; ++i) {
+        if (cards[i] >= NUM_CARDS) return 7462;
+        c[i] = impl_->deck[cards[i]];
+    }
 
     uint16_t best = 7462;
     #define E5(a,b,c_,d,e) best = std::min(best, impl_->eval5_internal(c[a],c[b],c[c_],c[d],c[e]))

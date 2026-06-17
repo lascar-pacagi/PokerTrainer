@@ -138,8 +138,11 @@ int32_t pt_eval_rank_category(int32_t rank, char* out, int32_t out_cap) {
 // ─── Env lifecycle ──────────────────────────────────────────────────────────
 void* pt_env_create(uint64_t seed, int64_t starting_stack_chips) {
     try {
+        // EnvBox's ctor constructs Env(seed, stack), whose ctor already calls
+        // reset() (deals the first hand). A second reset() here would consume an
+        // extra RNG draw, so the FFI's first hand for a seed would differ from a
+        // pybind/C++ Env(seed) — drop it for cross-binding reproducibility.
         auto* b = new EnvBox(seed, starting_stack_chips);
-        b->env.reset();  // ensure first observation is ready
         return static_cast<void*>(b);
     } catch (...) {
         return nullptr;

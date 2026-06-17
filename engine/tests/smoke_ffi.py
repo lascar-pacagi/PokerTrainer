@@ -122,13 +122,14 @@ ACTION_ALL_IN     = 10
 def main() -> None:
     assert lib.pt_eval_init(b"") == 0
 
-    # Constants sanity (v0.4).
-    assert lib.pt_x_dim()       == 812
+    # Constants sanity. Must track engine/src/encoder.h (X_DIM=816 since the
+    # STATIC_DIM 132->136 bump that added the per-street HIST_TRUNCATED flags).
+    assert lib.pt_x_dim()       == 816
     assert lib.pt_a_dim()       == 11
     assert lib.pt_num_actions() == 11
     assert lib.pt_hist_max()    == 34
     assert lib.pt_hist_feat()   == 20
-    assert lib.pt_x_off_street(0) == 132
+    assert lib.pt_x_off_street(0) == 136
     assert lib.pt_street_slots(0) == 10
     assert lib.pt_street_slots(1) == 8
     assert lib.pt_street_slots(2) == 8

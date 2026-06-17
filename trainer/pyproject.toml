@@ -15,8 +15,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
+# Must list every package that ships in this tree: evaluate/policies.py imports
+# cfr.*, and the search trainers (rebel_py, pluribus) are first-class too. Omit
+# one and `pip install -e .` leaves imports broken outside a PYTHONPATH checkout.
 [tool.setuptools.packages.find]
-include = ["dmc*", "evaluate*", "export*"]
+include = ["cfr*", "dmc*", "evaluate*", "export*", "rebel_py*", "pluribus*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
