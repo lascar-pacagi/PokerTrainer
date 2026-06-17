@@ -48,15 +48,21 @@ This matches the hand evaluator's `make_card(rank, suit)` indexing.
 |-----|----------------|--------------------------------------------|
 | 0   | FOLD           | —                                          |
 | 1   | CHECK_CALL     | match the current to-call amount           |
-| 2   | RAISE_25       | bet_to = to_call + 0.25 * (pot + to_call)  |
-| 3   | RAISE_33       | bet_to = to_call + 0.33 * (pot + to_call)  |
-| 4   | RAISE_50       | bet_to = to_call + 0.50 * (pot + to_call)  |
-| 5   | RAISE_75       | bet_to = to_call + 0.75 * (pot + to_call)  |
+| 2   | RAISE_25       | bet_to = current_bet + 0.25 * (pot + to_call) |
+| 3   | RAISE_33       | bet_to = current_bet + 0.33 * (pot + to_call) |
+| 4   | RAISE_50       | bet_to = current_bet + 0.50 * (pot + to_call) |
+| 5   | RAISE_75       | bet_to = current_bet + 0.75 * (pot + to_call) |
 | 6   | RAISE_100      | pot-sized raise after call                 |
 | 7   | RAISE_150      | 1.5× pot                                   |
 | 8   | RAISE_200      | 2.0× pot                                   |
 | 9   | RAISE_300      | 3.0× pot                                   |
 | 10  | ALL_IN         | shove effective stack                      |
+
+`current_bet` is the highest amount invested **this street** (the level a call
+matches); it equals `to_call` only *before* you have put chips in this street,
+so the two are **not** interchangeable after a prior bet/raise. The pot fraction
+is applied to the pot *after* the hypothetical call. The implementation is
+`HUState::raise_to_from_fraction` (`engine/src/game_hu.cpp`).
 
 Raises below legal min-raise are snapped up; above effective stack are snapped
 down to all-in. Illegal actions are masked at the Env level. Note: on small

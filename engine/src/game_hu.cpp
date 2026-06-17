@@ -32,8 +32,9 @@ bool HUState::is_all_in_showdown() const {
 }
 
 int64_t HUState::raise_to_from_fraction(double pot_fraction) const {
-    // Per docs/STATE_ENCODING.md: bet_to = to_call + fraction * (pot + to_call),
-    // then snap up to min-raise and down to effective all-in.
+    // Per docs/STATE_ENCODING.md: bet_to = current_bet + fraction * (pot + to_call),
+    // then snap up to min-raise and down to effective all-in. (current_bet is the
+    // call level = max invested this street; it equals to_call only pre-investment.)
     const int64_t tc       = to_call_chips();
     const int64_t cur_bet  = current_bet_chips();
     const int64_t me_inv   = invested_this_street[static_cast<int>(to_act)];
