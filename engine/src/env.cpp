@@ -31,11 +31,18 @@ Env::~Env() = default;
 Env::Env(Env&&) noexcept = default;
 Env& Env::operator=(Env&&) noexcept = default;
 
+// Builds nothing (no HandEvaluator); clone() fills impl_/state_ right after.
+Env::Env(CloneTag) noexcept {}
+
 std::unique_ptr<Env> Env::clone() const {
-    // Bypass the public ctor (which calls reset() and rerolls the deal) by
-    // constructing an empty Env via the move-ctor on a default-seeded one
-    // and overwriting both the impl and state.
-    auto out = std::unique_ptr<Env>(new Env(0, impl_->starting_stack_chips));
+    // Construct via the private CloneTag ctor, which builds NOTHING — crucially
+    // it does NOT run the public ctor, whose Impl build calls
+    // HandEvaluator::load_or_generate() (≈2 ms). The old code did
+    // `new Env(0, stack)` and threw that fresh evaluator away, paying the full
+    // table build on every clone — a silent tax on all CFR traversal. Now we
+    // just copy the Impl (shared_ptr evaluator → refcount bump, RNG byte-copy)
+    // and the small HUState by value.
+    auto out = std::unique_ptr<Env>(new Env(CloneTag{}));
     out->impl_  = std::make_unique<Impl>(*impl_);
     out->state_ = state_;
     return out;

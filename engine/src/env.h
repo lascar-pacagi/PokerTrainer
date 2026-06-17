@@ -92,6 +92,13 @@ public:
 
 private:
     struct Impl;
+    // Tag ctor for clone(): builds NOTHING (no HandEvaluator) — impl_/state_ are
+    // filled in by clone() afterwards. Avoids the public ctor's expensive
+    // load_or_generate() of the eval tables on every clone (the hot path for
+    // external-sampling CFR traversal: ~2 ms/clone otherwise).
+    struct CloneTag {};
+    explicit Env(CloneTag) noexcept;   // defined in env.cpp (Impl is complete there)
+
     std::unique_ptr<Impl> impl_;
     HUState state_;
 };
