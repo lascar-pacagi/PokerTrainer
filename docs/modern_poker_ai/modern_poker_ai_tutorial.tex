@@ -1863,9 +1863,9 @@ kind of certificate AlphaHoldem lacks.
 \midrule
 year                 & 2019 & 2019 & 2020 & 2021 & 2022 \\
 core engine          & CFR  & CFR  & CFR+RL & CFR+MCTS & PPO \\
-neural nets          & value+policy & \textbf{none} & value+policy & CVPN & policy+value \\
+neural nets          & advantage+policy & \textbf{none} & value+policy & CVPN & policy+value \\
 search at play time  & no   & yes  & yes  & yes  & no \\
-belief states needed & no   & no   & yes  & yes  & no \\
+belief-state value net & no   & no   & yes  & yes  & no \\
 abstraction needed   & no   & yes  & no   & no   & no \\
 players              & 2    & \textbf{6} & 2 & 2 & 2 \\
 theoretical target   & Nash & none (empirical) & Nash & sound search & none \\
