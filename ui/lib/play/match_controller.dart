@@ -317,6 +317,18 @@ class MatchController extends ChangeNotifier {
     await _slumbotLocalAct(legalIdx);
   }
 
+  /// The cosmetic mirror diverged from Slumbot (who is authoritative). Never
+  /// crash the match: snapshot the breadcrumb trail into the diagnostic, log it,
+  /// and surface a friendly "tap New hand" message. Callers notify/return.
+  void _flagDesync(String where) {
+    _trace('!! DESYNC $where');
+    _diagnostic = 'Slumbot mirror desync · $where\n${_trail.join("\n")}';
+    debugPrint('=== SLUMBOT MIRROR DESYNC ===\n$_diagnostic\n'
+        '=============================');
+    _error = 'Table display lost sync with Slumbot — tap “New hand”. '
+        '(Diagnostic captured below / in the logs.)';
+  }
+
   // ─── Slumbot orchestration ──────────────────────────────────────────────
 
   Future<void> _slumbotNewHand() async {
@@ -381,10 +393,22 @@ class MatchController extends ChangeNotifier {
     _trace('ME $incr (idx=$legalIdx $type) | ${_stateBrief()}');
 
     // Apply our action to the mirror first (instant UI feedback), then post.
-    if (type == ActionType.fold || type == ActionType.checkCall) {
-      session.applyActionDirect(type);
-    } else {
-      session.applyRaiseToDirect(sizing); // RAISE_* / ALL_IN → exact chips
+    // The mirror is COSMETIC and can rarely reject our OWN action when it has
+    // drifted from Slumbot (e.g. a NO_CARD / pre-river all-in edge): catching it
+    // here turns a desync into "tap New hand" + a captured diagnostic instead of
+    // an unhandled `pt_env_step_action failed rc=-1` crash. The earlier fix
+    // guarded Slumbot's replay (_applyServerState) but not this local apply,
+    // which is exactly where a "couldn't call the all-in" crash surfaced.
+    try {
+      if (type == ActionType.fold || type == ActionType.checkCall) {
+        session.applyActionDirect(type);
+      } else {
+        session.applyRaiseToDirect(sizing); // RAISE_* / ALL_IN → exact chips
+      }
+    } on StateError catch (e) {
+      _flagDesync('local apply rejected "$incr" ($type) | ${_stateBrief()} · $e');
+      notifyListeners();
+      return;
     }
     _bubbleStreetGate(myStreet);          // dropped stale labels if a new round
     _bubbles[_localSeat] = myLabel;
@@ -436,12 +460,7 @@ class MatchController extends ChangeNotifier {
         // it, and let the user start a fresh one. If the hand is in fact over,
         // the handOver block below still banks Slumbot's reported result.
         // Snapshot the breadcrumb trail so the (rare) exact trigger is capturable.
-        _trace('!! ENGINE REJECTED ${_tokBrief(a)} ($e)');
-        _diagnostic = 'Slumbot mirror desync · full action="${resp.action}"\n'
-            '${_trail.join("\n")}';
-        debugPrint('=== SLUMBOT MIRROR DESYNC ===\n$_diagnostic\n=============================');
-        _error = 'Table display lost sync with Slumbot — tap “New hand”. '
-            '(Diagnostic captured below / in the logs.)';
+        _flagDesync('replay rejected ${_tokBrief(a)} · full action="${resp.action}" · $e');
         _appliedTokens = tokens.length;
         break;
       }
