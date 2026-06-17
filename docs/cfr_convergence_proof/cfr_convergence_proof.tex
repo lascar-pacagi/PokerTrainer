@@ -111,9 +111,11 @@ is an $\varepsilon$-Nash equilibrium with
 \varepsilon \;\le\; \frac{2\,\Delta\,|\mathcal{I}|\,\sqrt{A}}{\sqrt{T}},
 \]
 where $\Delta$ is the payoff range of the game, $|\mathcal{I}|$ the number of
-information sets of one player, and $A$ the maximum number of actions at any
-of them. In particular $\varepsilon \to 0$: average CFR self-play converges
-to GTO.
+information sets, and $A$ the maximum number of actions at any of them --- with
+$|\mathcal{I}|$ and $A$ taken as the \emph{larger} of the two players' values,
+so this symmetric form is a valid worst case (the exact, possibly asymmetric,
+bound is assembled in Sec.~6). In particular $\varepsilon \to 0$: average CFR
+self-play converges to GTO.
 \end{thmbox}
 
 The proof has three independent ingredients, each interesting on its own:
@@ -385,14 +387,24 @@ $(\bar\sigma_1,\bar\sigma_2)$ such that neither player can gain more than
 $\varepsilon$ by deviating unilaterally:
 $u(\sigma_1',\bar\sigma_2) \le u(\bar\sigma_1,\bar\sigma_2) + \varepsilon$
 for every $\sigma_1'$, and symmetrically for player 2. The smallest such
-$\varepsilon$ is the profile's \emph{exploitability}: how much a perfect
-counter-strategy could win above the equilibrium value.
+$\varepsilon$ --- the \emph{larger} of the two players' best-response gains ---
+measures the profile's distance from equilibrium. \textbf{Convention warning:}
+``exploitability'' is also used (including by this repo's
+\texttt{exploitability\_bb}) for the related but distinct quantity that
+\emph{averages} the two best-response gains, $\tfrac12(\delta_1+\delta_2)$, in
+bb/hand. The two differ by at most a factor of two and the convergence
+statement is unaffected --- but do not equate the raw numbers across
+conventions.
 \end{defbox}
 
 \begin{defbox}
 \textbf{Average strategy.} $\bar\sigma_i = \frac1T\sum_{t=1}^{T}\sigma_i^t$ ---
-the mixture that plays a uniformly random past round's strategy. The single
-property we need is linearity of expected payoff in each argument:
+the mixture that plays a uniformly random past round's strategy. (In an
+\emph{extensive-form} game this averaging must be \emph{reach-weighted}, not
+arithmetic, or the linearity step below breaks --- see the \textbf{Watch out}
+box right after Theorem~B; in this section's single-decision setting the two
+coincide.) The single property we need is linearity of expected payoff in each
+argument:
 \[
 \frac1T \sum_{t=1}^{T} u(\sigma_1', \sigma_2^t) \;=\;
 u\Bigl(\sigma_1', \tfrac1T\textstyle\sum_t \sigma_2^t\Bigr) \;=\;
@@ -508,7 +520,8 @@ R_T^{\mathrm{game}} \;\le\; \sum_{I \in \mathcal{I}}
 \]
 \end{thmbox}
 
-\emph{Proof idea, made precise by induction.} The global regret compares
+\emph{Proof sketch (the full induction is in Zinkevich et al.\ 2007).} The
+global regret compares
 your play to the best \emph{deviation strategy} $\sigma'$ --- a full
 alternative plan that may change the action at \emph{every} infoset at once.
 The key observation is that any such plan can be charged, infoset by infoset,
@@ -545,7 +558,7 @@ can induct from the leaves upward:
 \end{tikzpicture}
 \end{center}
 
-Formally, one shows for every infoset $I$:
+Formally, one shows for every infoset $I$ the \emph{raw} recurrence
 \[
 R_T^{\mathrm{full}}(I) \;\le\; R_T^{\mathrm{imm}}(I)
 \;+\; \sum_{I' \in \mathrm{succ}(I)} \pos{R_T^{\mathrm{full}}(I')},
@@ -556,12 +569,20 @@ at $I$ alone gains (at most $R_T^{\mathrm{imm}}(I)$, by definition of the
 immediate regret), and then gains whatever its sub-plan gains below ---
 but each below-gain is counted in that child's own full regret, and clipping
 at zero lets us include \emph{all} children instead of only the ones the plan
-steers toward (adding non-negative terms can only help the bound). Taking
-positive parts of both sides preserves the inequality, and unrolling the
-recursion from the leaves (where
-$R^{\mathrm{full}} = R^{\mathrm{imm}}$) up to the root turns the nested sums
-into one flat sum over all infosets. At the root, the at-and-below regret
-\emph{is} the whole-game regret. $\square$
+steers toward (adding non-negative terms only loosens the bound). Now take the
+positive part of both sides: since the child sum is already non-negative and
+$\pos{x+y} \le x^{+}+y$ whenever $y \ge 0$, the raw recurrence becomes the
+\emph{clipped} form that matches the theorem statement,
+\[
+\pos{R_T^{\mathrm{full}}(I)} \;\le\; \pos{R_T^{\mathrm{imm}}(I)}
+\;+\; \sum_{I' \in \mathrm{succ}(I)} \pos{R_T^{\mathrm{full}}(I')}.
+\]
+Unrolling from the leaves (where $R^{\mathrm{full}} = R^{\mathrm{imm}}$, hence
+$\pos{R^{\mathrm{full}}} = \pos{R^{\mathrm{imm}}}$) up to the root collapses the
+nested sums into one flat $\sum_{I}\pos{R_T^{\mathrm{imm}}(I)}$. At the root the
+at-and-below regret \emph{is} the whole-game regret, so
+$R_T^{\mathrm{game}} \le \pos{R_T^{\mathrm{game}}}
+\le \sum_{I}\pos{R_T^{\mathrm{imm}}(I)}$. $\square$
 
 \begin{intuition}
 Why must the local values be \emph{counterfactual} --- weighted by the
@@ -608,6 +629,17 @@ $\varepsilon$-Nash equilibrium with
 \;\xrightarrow[T\to\infty]{}\; 0 . \qquad\blacksquare
 \]
 \end{thmbox}
+
+\textbf{Asymmetric games.} The $\varepsilon_i$ above is really
+$\varepsilon_i = |\mathcal{I}_i|\,\Delta\sqrt{A_i}/\sqrt{T}$, built from player
+$i$'s \emph{own} infoset count and action count, so the exact bound is
+\[
+\varepsilon \;\le\; \frac{\Delta\bigl(|\mathcal{I}_1|\sqrt{A_1}
+   + |\mathcal{I}_2|\sqrt{A_2}\bigr)}{\sqrt{T}}.
+\]
+Writing $|\mathcal{I}|,A$ for the larger of the two players' values collapses
+this to the symmetric $2\,\Delta\,|\mathcal{I}|\sqrt{A}/\sqrt{T}$ quoted in
+Section~1. (Heads-up poker is nearly symmetric, so the gap is small.)
 
 Each inequality is one ingredient, and each ingredient carries one idea:
 
@@ -670,13 +702,17 @@ low regret no longer implies an equilibrium (this is why Pluribus, in volume
 two, abandons the theoretical target). Theorem C's induction used perfect
 recall to make the infosets a tree.
 
-\textbf{Better constants exist, same skeleton.} CFR$^{+}$ (clip cumulative
-regrets, alternate updates) and Linear CFR (weight round $t$ by $t$) both
-admit the same style of proof with strictly better constants --- the
-potential argument survives clipping (Lemma 2 is exactly what is needed) and
-survives weighting (sum $t\,r_t$ instead of $r_t$; the orthogonality is
-unchanged). Empirically they converge several times faster, which is why
-this project's trainer uses Linear CFR.
+\textbf{Faster variants, same skeleton.} CFR$^{+}$ (regret-matching$^{+}$:
+clip the \emph{cumulative} regrets to $\ge 0$, with alternating updates and
+linear averaging) and Linear CFR (weight round $t$'s contribution by $t$)
+reuse the same machinery --- the potential argument tolerates the extra
+clipping (Lemma~2 is exactly the inequality needed) and the round-weighting
+(carry $\sum_t t\,r_t$; the orthogonality identity is unchanged). Their
+advantage is \emph{primarily empirical}: both converge several times faster in
+practice. Matching worst-case \emph{bounds} are subtler --- CFR$^{+}$ for years
+carried only the same $O(1/\sqrt{T})$ guarantee as plain CFR despite its speed,
+and Linear CFR's improvement comes with its own discount-dependent analysis
+(Tammelin 2014; Brown \& Sandholm 2019). This project's trainer uses Linear CFR.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Further reading}
