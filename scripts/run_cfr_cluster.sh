@@ -18,6 +18,16 @@
 # Override defaults via env:
 #   ACTORS=32 ITERS=500 K=10000 D_MODEL=256 LAYERS=6 \
 #       bash scripts/run_cfr_cluster.sh ...
+#   MAX_RAISES=3 POLICY_EVERY=100 SAVE_BUFFERS=1 CKPT_EVERY=10 \
+#       bash scripts/run_cfr_cluster.sh ...
+#
+# Resume is AUTOMATIC: re-launching with the SAME ckpt-dir picks up the latest
+# cfr_iter_*.ckpt (+ cfr_buffers.npz if SAVE_BUFFERS=1) and continues. A fresh
+# run just needs an empty ckpt-dir.
+#
+# NOTE: the image embeds /opt/pokertrainer/trainer at BUILD time. After changing
+# trainer code, REBUILD the .sif (or bind-mount the repo over the container path)
+# or the container will run the old code.
 #
 # Pre-flight checks expected on the cluster:
 #   * a CUDA-visible GPU (nvidia-smi works inside `singularity exec --nv`)
@@ -61,6 +71,23 @@ SEED="${SEED:-42}"
 STACK_BB="${STACK_BB:-100}"
 PUSH_FOLD="${PUSH_FOLD:-0}"
 ORACLE_DEALS="${ORACLE_DEALS:-12000000}"
+
+# ── Tree-size + harvest knobs ───────────────────────────────────────────────
+# MAX_RAISES caps voluntary raises per street (training-only action abstraction)
+# — bounds the deep-stack re-raise wars that make full-depth 100bb traversal
+# explode. 0 = uncapped. POLICY_EVERY (>0) periodically trains the PolicyNet and
+# prints the per-street AA/72o probe of the AVERAGE strategy (the GTO-evolution
+# signal). SAVE_BUFFERS=1 persists the reservoirs with each checkpoint for an
+# exact, zero-regression resume (multi-GB; raise CKPT_EVERY if I/O dominates).
+MAX_RAISES="${MAX_RAISES:-3}"
+POLICY_EVERY="${POLICY_EVERY:-100}"
+SAVE_BUFFERS="${SAVE_BUFFERS:-1}"
+CKPT_EVERY="${CKPT_EVERY:-10}"
+
+EXTRA_FLAGS=(--max-raises-per-street "$MAX_RAISES"
+             --policy-every-iter "$POLICY_EVERY"
+             --checkpoint-every-iter "$CKPT_EVERY")
+[[ "$SAVE_BUFFERS" == "1" ]] || EXTRA_FLAGS+=(--no-save-buffers)
 # SINGULARITYENV_ prefix is the reliable way to inject an env var into the
 # container; it appears inside as PT_ORACLE_CACHE. Point it at the bound,
 # writable ckpt dir (the container CWD's runs/ may be read-only).
@@ -84,6 +111,8 @@ echo "[run_cfr_cluster] ckpt=$CKPT_DIR"
 echo "[run_cfr_cluster] actors=$ACTORS iters=$ITERS K=$K"
 echo "[run_cfr_cluster] d_model=$D_MODEL layers=$LAYERS heads=$N_HEADS d_ff=$D_FF device=$DEVICE"
 echo "[run_cfr_cluster] stage: stack_bb=$STACK_BB push_fold=$PUSH_FOLD oracle_deals=$ORACLE_DEALS"
+echo "[run_cfr_cluster] tree: max_raises=$MAX_RAISES policy_every=$POLICY_EVERY save_buffers=$SAVE_BUFFERS ckpt_every=$CKPT_EVERY"
+echo "[run_cfr_cluster] resume: auto from latest cfr_iter_*.ckpt in ckpt-dir (empty dir ⇒ fresh)"
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv || true
 
 singularity exec --nv \
@@ -105,5 +134,5 @@ singularity exec --nv \
         --policy-capacity     "$POL_CAP" \
         --ckpt-dir            "$CKPT_DIR" \
         --seed                "$SEED" \
-        --checkpoint-every-iter 10 \
+        "${EXTRA_FLAGS[@]}" \
         "${STAGE_FLAGS[@]}"

@@ -111,7 +111,7 @@ import torch
 
 import pokertrainer_engine as pte
 
-from .buffers import ReservoirBuffer
+from .buffers import ReservoirBuffer, save_buffers, load_buffers
 from .config import CFRConfig, BIG_BLIND_CHIPS
 from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
@@ -582,6 +582,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--resume-from", type=str, default="",
                    help="resume from a specific checkpoint file (overrides the "
                         "auto-scan of --ckpt-dir).")
+    p.add_argument("--no-save-buffers", action="store_true",
+                   help="do NOT persist the reservoir buffers with checkpoints. "
+                        "By default the buffers (the actual training data) are "
+                        "written to <ckpt-dir>/cfr_buffers.npz at each checkpoint "
+                        "and restored on resume → exact, zero-regression resume. "
+                        "They are multi-GB; --checkpoint-every-iter controls the "
+                        "write cadence (raise it if buffer I/O dominates).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
     p.add_argument("--max-raises-per-street", type=int, default=0,
@@ -696,19 +703,22 @@ def main() -> None:
     print(f"[cfr_coro] cfg.stage={cfg.stage}")
 
     # ── Resume from the latest checkpoint in --ckpt-dir (weights + iteration) ──
-    # The reservoir buffers are NOT restored (they refill); the first refits
-    # after a resume are protected from cold-buffer overfit by refit_adv_net's
-    # warm-up scaling (it scales grad-steps by buffer fill). --no-resume forces
-    # a fresh start; --resume-from points at a specific file.
+    # Nets + iteration here; the reservoir buffers (the training data) are
+    # restored separately once they are constructed, below — giving an exact,
+    # zero-regression resume when --no-save-buffers is not set. If buffers are
+    # NOT available, refit_adv_net's warm-up scaling protects the loaded net from
+    # a cold-buffer overfit. --no-resume forces fresh; --resume-from picks a file.
+    buffers_path = ckpt_dir / "cfr_buffers.npz"
     start_iter = 0
+    resumed = False
     if not args.no_resume:
         resume_path = (Path(args.resume_from) if args.resume_from
                        else find_latest_checkpoint(ckpt_dir))
         if resume_path and resume_path.exists():
             start_iter = load_checkpoint(resume_path, adv_nets, policy_net, device)
-            print(f"[cfr_coro] RESUMED from {resume_path} at iteration "
-                  f"{start_iter} → continuing at t={start_iter + 1}. "
-                  f"(buffers start empty; refit warms up as they refill)")
+            resumed = True
+            print(f"[cfr_coro] RESUMED nets from {resume_path} at iteration "
+                  f"{start_iter} → continuing at t={start_iter + 1}.")
         else:
             print("[cfr_coro] no checkpoint to resume; starting fresh.")
 
@@ -758,6 +768,24 @@ def main() -> None:
     ]
     pol_buf = ReservoirBuffer(cfg.buffer.policy_capacity, cfg.model.num_actions,
                               rng=np.random.default_rng(cfg.run.seed + 33))
+    named_bufs = {"adv0": adv_bufs[0], "adv1": adv_bufs[1], "pol": pol_buf}
+
+    # Restore the reservoir buffers for an exact resume (the nets were loaded
+    # above). If absent (e.g. --no-save-buffers on the prior run), continue with
+    # empty buffers — they refill, and the refit warm-up protects the loaded net.
+    if resumed and not args.no_save_buffers and buffers_path.exists():
+        bt0 = time.time()
+        buf_iter = load_buffers(str(buffers_path), named_bufs)
+        print(f"[cfr_coro] RESTORED buffers from {buffers_path} "
+              f"(saved at iteration {buf_iter}) in {time.time()-bt0:.1f}s → "
+              f"adv=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}] pol={len(pol_buf):,}")
+        if buf_iter != start_iter:
+            print(f"  note: buffer iteration {buf_iter} != net iteration "
+                  f"{start_iter} (crash between writes); harmless — buffer is "
+                  f"training data, nets refit from it.")
+    elif resumed:
+        print("[cfr_coro] no buffer file to restore; buffers start empty "
+              "(refit warm-up will protect the loaded net as they refill).")
 
     rng = np.random.default_rng(cfg.run.seed + 44)
 
@@ -831,6 +859,14 @@ def main() -> None:
             path = ckpt_dir / f"cfr_iter_{t:04d}.ckpt"
             save_checkpoint(path, adv_nets, policy_net, t, cfg)
             print(f"  saved {path}")
+            # Persist the reservoirs (the training data) for exact resume. Rolling
+            # single file, written atomically; the net ckpt above is per-iteration.
+            if not args.no_save_buffers:
+                bt0 = time.time()
+                save_buffers(str(buffers_path), named_bufs, t)
+                print(f"  saved buffers → {buffers_path} "
+                      f"(adv=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}] "
+                      f"pol={len(pol_buf):,}, {time.time()-bt0:.1f}s)")
 
         # ── Periodic AVERAGE-strategy harvest + per-street GTO probe ─────────
         # Train the PolicyNet (the average strategy = the actual GTO estimate)

@@ -29,6 +29,7 @@ Implementation notes:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -152,3 +153,82 @@ class ReservoirBuffer:
         self.t[:n]      = sd["t"]
         self.n_seen   = int(sd["n_seen"])
         self.n_filled = n
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DISK PERSISTENCE (for exact checkpoint resume — buffers ARE the training data)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The ragged per-entry token lists are flattened into one int16 array + a
+# lengths array (CSR-style), so a multi-GB reservoir saves/loads as plain numpy
+# without per-entry pickling. Several buffers share one .npz (keys prefixed by
+# name). Written atomically (tmp + os.replace) so a crash mid-write can't leave a
+# half-file that breaks the next resume.
+
+
+def _flatten_tokens(buf: "ReservoirBuffer") -> tuple[np.ndarray, np.ndarray]:
+    n = buf.n_filled
+    toks = [np.asarray(buf.tokens[i], dtype=np.int16) for i in range(n)]
+    lengths = np.array([t.shape[0] for t in toks], dtype=np.int32)
+    concat = (np.concatenate(toks) if toks
+              else np.zeros(0, dtype=np.int16))
+    return concat, lengths
+
+
+def save_buffers(path: str, named: dict[str, "ReservoirBuffer"],
+                 iteration: int) -> None:
+    """Atomically write a set of named reservoir buffers to one .npz."""
+    # Pure-numeric .npz (no object arrays → no pickle): load_buffers iterates the
+    # caller's buffer dict, so the names need not be stored in the file.
+    out: dict[str, np.ndarray] = {
+        "__iteration": np.array([iteration], dtype=np.int64),
+    }
+    for name, buf in named.items():
+        concat, lengths = _flatten_tokens(buf)
+        n = buf.n_filled
+        out[f"{name}__capacity"]    = np.array([buf.capacity], dtype=np.int64)
+        out[f"{name}__num_actions"] = np.array([buf.num_actions], dtype=np.int64)
+        out[f"{name}__n_seen"]      = np.array([buf.n_seen], dtype=np.int64)
+        out[f"{name}__n_filled"]    = np.array([n], dtype=np.int64)
+        out[f"{name}__tok_concat"]  = concat
+        out[f"{name}__tok_len"]     = lengths
+        out[f"{name}__dpos"]        = buf.dpos[:n].copy()
+        out[f"{name}__target"]      = buf.target[:n].copy()
+        out[f"{name}__t"]           = buf.t[:n].copy()
+    tmp = f"{path}.tmp"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.savez(tmp, **out)                       # np.savez appends .npz to tmp
+    os.replace(tmp + ".npz", path)
+
+
+def load_buffers(path: str, named: dict[str, "ReservoirBuffer"]) -> int:
+    """Refill the given buffers in place from a .npz written by save_buffers.
+
+    Returns the saved iteration. Capacity/num_actions must match the buffers
+    constructed by the caller (assert) — a fresh run constructs them from the
+    same CLI flags, so this holds; if a flag changed, fail loudly rather than
+    silently corrupt the reservoir semantics."""
+    with np.load(path) as z:                   # pure-numeric file → no allow_pickle
+        iteration = int(z["__iteration"][0])
+        for name, buf in named.items():
+            if f"{name}__n_filled" not in z:
+                print(f"[buffers] WARNING: '{name}' absent in {path}; left empty.")
+                continue
+            cap = int(z[f"{name}__capacity"][0])
+            na = int(z[f"{name}__num_actions"][0])
+            assert cap == buf.capacity, (
+                f"buffer '{name}' capacity {cap} != configured {buf.capacity}; "
+                "match --adv-capacity/--policy-capacity to the saved run.")
+            assert na == buf.num_actions, name
+            n = int(z[f"{name}__n_filled"][0])
+            lengths = z[f"{name}__tok_len"]
+            concat = z[f"{name}__tok_concat"]
+            offs = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
+            for i in range(n):
+                buf.tokens[i] = concat[offs[i]:offs[i + 1]].astype(np.int16).copy()
+            buf.dpos[:n]   = z[f"{name}__dpos"]
+            buf.target[:n] = z[f"{name}__target"]
+            buf.t[:n]      = z[f"{name}__t"]
+            buf.n_filled = n
+            buf.n_seen = int(z[f"{name}__n_seen"][0])
+    return iteration
