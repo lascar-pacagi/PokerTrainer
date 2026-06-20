@@ -48,7 +48,21 @@ def refit_adv_net(net: AdvNet,
     opt = torch.optim.Adam(net.parameters(),
                            lr=cfg.optim.lr,
                            weight_decay=cfg.optim.weight_decay)
-    n_steps = cfg.optim.n_grad_steps_per_refit
+    # Cold-buffer warm-up: cap the refit at ~`refit_max_epochs` passes over the
+    # CURRENTLY STORED samples, so a small reservoir (the first iterations of a
+    # run, or the empty buffer right after a --resume) cannot overfit-and-destroy
+    # the net with a full n_grad_steps grind. This is a strict no-op once the
+    # buffer is large (min() keeps the full count): e.g. at 7M samples / batch
+    # 1024, even 10 epochs is ~68k >> 15k, so steady-state is unchanged; at 76k
+    # samples it caps ~740 steps (10 epochs) instead of 15k (≈200 epochs).
+    refit_max_epochs = float(getattr(cfg.optim, "refit_max_epochs", 10.0))
+    n_filled = len(buf)
+    full_steps = cfg.optim.n_grad_steps_per_refit
+    warm_cap = max(1, int(refit_max_epochs * max(1, n_filled) / cfg.optim.batch_size))
+    n_steps = min(full_steps, warm_cap)
+    if n_steps < full_steps:
+        print(f"      [warm-up] buffer={n_filled:,} → refit {n_steps}/{full_steps} "
+              f"steps (~{refit_max_epochs:g} epochs) to protect the net")
     losses: list[float] = []
     last_log_step = 0
     t_start = time.time()
@@ -168,3 +182,32 @@ def save_checkpoint(path: Path,
         "policy_net":      {k: v.detach().cpu() for k, v in policy_net.state_dict().items()},
         "cfg":             cfg,
     }, path)
+
+
+def find_latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
+    """Newest resumable checkpoint in `ckpt_dir`, or None.
+
+    Prefers the highest-numbered ``cfr_iter_NNNN.ckpt`` (those carry the
+    iteration count to continue from); falls back to ``cfr_final.ckpt``."""
+    iters = sorted(ckpt_dir.glob("cfr_iter_*.ckpt"))
+    if iters:
+        return iters[-1]                      # zero-padded names sort by iteration
+    final = ckpt_dir / "cfr_final.ckpt"
+    return final if final.exists() else None
+
+
+def load_checkpoint(path: Path,
+                    adv_nets: list[nn.Module],
+                    policy_net: nn.Module,
+                    device: torch.device) -> int:
+    """Restore both AdvNets + the PolicyNet in place; return the saved iteration.
+
+    Weights only — the reservoir buffers are NOT checkpointed (they refill over
+    the next few iterations). The caller protects the just-loaded nets from a
+    cold-buffer refit via the warm-up scaling in ``refit_adv_net``. We trust our
+    own checkpoint (weights_only=False to allow the embedded cfg object)."""
+    blob = torch.load(path, map_location=device, weights_only=False)
+    adv_nets[0].load_state_dict(blob["adv_net_sb"])
+    adv_nets[1].load_state_dict(blob["adv_net_bb"])
+    policy_net.load_state_dict(blob["policy_net"])
+    return int(blob.get("iteration", 0))

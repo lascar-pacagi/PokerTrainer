@@ -191,6 +191,30 @@ class CFRPolicyNetPolicy:
         self.name = name
 
     @torch.no_grad()
+    def distribution_with_env(self, env) -> np.ndarray:
+        """The PolicyNet's full NUM_ACTIONS strategy at the current state.
+
+        Legal-masked and renormalized over the legal set (0 in illegal slots),
+        summing to 1. This is the *average* strategy (the deployable GTO
+        estimate) — used by the per-street probe to read AA/72o's distribution
+        without sampling noise. Tokenizes from the to-act player's seat."""
+        obs = env.observation()
+        seat = int(env.to_act())
+        tok_state = tokenize_state(env.state(), seat)
+        tokens_np, pad_mask_np, dpos_np = pad_batch([tok_state])
+        tokens   = torch.from_numpy(tokens_np).to(self.device)
+        pad_mask = torch.from_numpy(pad_mask_np).to(self.device)
+        dpos     = torch.from_numpy(dpos_np).to(self.device)
+        mask     = _legal_mask_from_obs(obs)
+        legal_mask_t = torch.from_numpy(mask).to(self.device).unsqueeze(0)
+        probs = self.net(tokens, pad_mask, dpos, legal_mask_t).squeeze(0).cpu().numpy()
+        probs = probs * mask
+        z = probs.sum()
+        if z <= 0:                                  # net put no mass on legal → uniform
+            return mask / max(1.0, mask.sum())
+        return probs / z
+
+    @torch.no_grad()
     def choose_with_env(self, env, rng: np.random.Generator) -> int:
         """Tokenize current state and sample from PolicyNet's masked softmax.
 
@@ -201,17 +225,9 @@ class CFRPolicyNetPolicy:
         obs = env.observation()
         if len(obs.legal) == 1:
             return 0
-        seat = int(env.to_act())
-        tok_state = tokenize_state(env.state(), seat)
-        tokens_np, pad_mask_np, dpos_np = pad_batch([tok_state])
-        tokens   = torch.from_numpy(tokens_np).to(self.device)
-        pad_mask = torch.from_numpy(pad_mask_np).to(self.device)
-        dpos     = torch.from_numpy(dpos_np).to(self.device)
-        mask     = _legal_mask_from_obs(obs)
-        legal_mask_t = torch.from_numpy(mask).to(self.device).unsqueeze(0)
-        probs = self.net(tokens, pad_mask, dpos, legal_mask_t).squeeze(0).cpu().numpy()
+        sigma = self.distribution_with_env(env)         # full NUM_ACTIONS, masked
         legal_int = np.array([int(at) for at in obs.legal], dtype=np.int64)
-        legal_probs = probs[legal_int]
+        legal_probs = sigma[legal_int]
         z = legal_probs.sum()
         if z <= 0:
             legal_probs = np.full(len(obs.legal), 1.0 / len(obs.legal),

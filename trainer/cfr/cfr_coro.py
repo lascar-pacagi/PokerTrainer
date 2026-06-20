@@ -117,8 +117,10 @@ from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
 from .tokenize import TokenizedState, tokenize_state, pad_batch
 from .traversal import DEFAULT_MAX_DEPTH, REGRET_SCALE
-from .train import refit_adv_net, train_policy_net, save_checkpoint
-from .probe import run_default_probes, format_probe_line
+from .train import (refit_adv_net, train_policy_net, save_checkpoint,
+                    find_latest_checkpoint, load_checkpoint)
+from .probe import (run_default_probes, format_probe_line,
+                    run_policy_street_probes, format_street_probe)
 
 
 NUM_ACTIONS = 11
@@ -160,7 +162,8 @@ def traverse_coro(env,
                   pol_writes: list,
                   max_depth: int = DEFAULT_MAX_DEPTH,
                   allowed: Optional[frozenset] = None,
-                  regret_scale: float = REGRET_SCALE):
+                  regret_scale: float = REGRET_SCALE,
+                  max_raises_per_street: Optional[int] = None):
     """Generator-coroutine implementing one external-sampling MCCFR traversal.
 
     YIELDS:
@@ -193,6 +196,20 @@ def traverse_coro(env,
         # stays at its zero-init baseline (neutral when a later stage unlocks
         # the action). See CFRStageConfig.
         legal = [at for at in legal if int(at) in allowed]
+    # Re-raise cap (action ABSTRACTION, training-only): once `max_raises_per_street`
+    # voluntary aggressive actions (RAISE_* / ALL_IN, type >= 2) have happened on
+    # the CURRENT street, drop all raises so only FOLD / CHECK_CALL remain. This
+    # bounds 100bb re-raise wars — the dominant source of full-depth tree blowup
+    # once the depth cap is removed — at modest abstraction cost (most solvers and
+    # Pluribus cap raises too). It is NOT an engine rule: play/eval/the Slumbot
+    # mirror still allow arbitrary raises. None = uncapped (legacy behavior).
+    if max_raises_per_street is not None:
+        st = env.state()
+        cur_street = int(st.street)
+        raises = sum(1 for h in st.history
+                     if int(h.street) == cur_street and int(h.type) >= 2)
+        if raises >= max_raises_per_street:
+            legal = [at for at in legal if int(at) <= 1]   # keep FOLD, CHECK_CALL
     n_legal = len(legal)
     # Build the mask from the (possibly filtered) legal set so regret matching
     # can put no mass on a forbidden slot.
@@ -239,7 +256,8 @@ def traverse_coro(env,
             v_a = yield from traverse_coro(child, traverser, rng,
                                            adv_writes, pol_writes,
                                            max_depth=max_depth, allowed=allowed,
-                                           regret_scale=regret_scale)
+                                           regret_scale=regret_scale,
+                                           max_raises_per_street=max_raises_per_street)
             action_values[int(at)] = v_a
         v_state = float((sigma * action_values).sum())
         regrets = (action_values - v_state) * mask / regret_scale
@@ -263,7 +281,8 @@ def traverse_coro(env,
     return (yield from traverse_coro(env, traverser, rng,
                                      adv_writes, pol_writes,
                                      max_depth=max_depth, allowed=allowed,
-                                     regret_scale=regret_scale))
+                                     regret_scale=regret_scale,
+                                     max_raises_per_street=max_raises_per_street))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -295,6 +314,9 @@ class _Slot:
     # Regret-target divisor; should track the effective stack in bb so targets
     # are O(1) regardless of stack depth (= REGRET_SCALE for the 100bb game).
     regret_scale: float = REGRET_SCALE
+    # Action-abstraction re-raise cap per street (None = uncapped). Persisted on
+    # the slot so restarts reuse it.
+    max_raises_per_street: Optional[int] = None
 
 
 def _start_traversal(slot: _Slot,
@@ -317,7 +339,8 @@ def _start_traversal(slot: _Slot,
     slot.coro = traverse_coro(slot.env, slot.traverser, rng,
                               slot.adv_writes, slot.pol_writes,
                               allowed=slot.allowed,
-                              regret_scale=slot.regret_scale)
+                              regret_scale=slot.regret_scale,
+                              max_raises_per_street=slot.max_raises_per_street)
     # Prime: run until first yield. If the traversal is trivial enough to
     # finish without yielding (impossible in practice — every non-terminal
     # state requires inference), we'd catch StopIteration here.
@@ -432,7 +455,8 @@ def run_K_traversals(K: int,
                      max_depth: int = DEFAULT_MAX_DEPTH,
                      starting_stack_chips: Optional[int] = None,
                      allowed: Optional[frozenset] = None,
-                     regret_scale: float = REGRET_SCALE) -> dict:
+                     regret_scale: float = REGRET_SCALE,
+                     max_raises_per_street: Optional[int] = None) -> dict:
     """Run K traversals using N_VIRTUAL coroutines in lockstep.
 
     Each completed traversal contributes its accumulated `adv_writes` to
@@ -463,7 +487,8 @@ def run_K_traversals(K: int,
 
     slots = [
         _Slot(env=_make_env((base_seed + i * 1009 + t * 1234567) & 0xFFFFFFFFFFFFFFFF),
-              allowed=allowed, regret_scale=regret_scale)
+              allowed=allowed, regret_scale=regret_scale,
+              max_raises_per_street=max_raises_per_street)
         for i in range(n_virtual)
     ]
     for s in slots:
@@ -551,8 +576,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-linear-cfr", action="store_true")
     p.add_argument("--ckpt-dir", type=str, default="runs/cfr_coro_latest")
     p.add_argument("--checkpoint-every-iter", type=int, default=5)
+    p.add_argument("--no-resume", action="store_true",
+                   help="start fresh even if a checkpoint exists in --ckpt-dir "
+                        "(default: auto-resume from the latest cfr_iter_*.ckpt).")
+    p.add_argument("--resume-from", type=str, default="",
+                   help="resume from a specific checkpoint file (overrides the "
+                        "auto-scan of --ckpt-dir).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    p.add_argument("--max-raises-per-street", type=int, default=0,
+                   help="action-abstraction re-raise cap per street (0 = uncapped). "
+                        "Once this many voluntary raises/all-ins have happened on a "
+                        "street, only fold/call remain — bounds 100bb re-raise wars "
+                        "that blow up full-depth traversal when --max-depth is large. "
+                        "Training-only; play/eval still allow arbitrary raises. "
+                        "Typical: 3.")
     # ── Curriculum stage knobs (see cfr/config.py:CFRStageConfig) ───────────
     p.add_argument("--starting-stack-bb", type=float, default=100.0,
                    help="Effective starting stack in big blinds. Stage 1 "
@@ -577,6 +615,15 @@ def parse_args() -> argparse.Namespace:
                    help="Hands per probe scenario (AA, then 72o). 400 gives "
                         "SE ≈ 300 mbb/hand on the AA scenario — fine for "
                         "tracking a several-bb signal across iterations.")
+    p.add_argument("--policy-every-iter", type=int, default=0,
+                   help="Every N iterations, (re)train the PolicyNet on the "
+                        "strategy buffer, checkpoint it, and run the PER-STREET "
+                        "AA/72o probe of the AVERAGE strategy (preflop/flop/turn/"
+                        "river). 0 = only at the end. This is the GTO-evolution "
+                        "signal (the average converges, the AdvNet iterate does "
+                        "not). E.g. 100.")
+    p.add_argument("--policy-probe-hands", type=int, default=400,
+                   help="Hands per scenario for the per-street policy probe.")
     p.add_argument("--smoke", action="store_true")
     return p.parse_args()
 
@@ -648,6 +695,27 @@ def main() -> None:
     print(f"[cfr_coro] cfg.train={cfg.train}")
     print(f"[cfr_coro] cfg.stage={cfg.stage}")
 
+    # ── Resume from the latest checkpoint in --ckpt-dir (weights + iteration) ──
+    # The reservoir buffers are NOT restored (they refill); the first refits
+    # after a resume are protected from cold-buffer overfit by refit_adv_net's
+    # warm-up scaling (it scales grad-steps by buffer fill). --no-resume forces
+    # a fresh start; --resume-from points at a specific file.
+    start_iter = 0
+    if not args.no_resume:
+        resume_path = (Path(args.resume_from) if args.resume_from
+                       else find_latest_checkpoint(ckpt_dir))
+        if resume_path and resume_path.exists():
+            start_iter = load_checkpoint(resume_path, adv_nets, policy_net, device)
+            print(f"[cfr_coro] RESUMED from {resume_path} at iteration "
+                  f"{start_iter} → continuing at t={start_iter + 1}. "
+                  f"(buffers start empty; refit warms up as they refill)")
+        else:
+            print("[cfr_coro] no checkpoint to resume; starting fresh.")
+
+    # Re-raise cap (0 → None = uncapped). Bounds full-depth re-raise wars.
+    max_raises = args.max_raises_per_street if args.max_raises_per_street > 0 else None
+    print(f"[cfr_coro] max_raises_per_street={max_raises}  max_depth={args.max_depth}")
+
     # Curriculum action restriction as a frozenset (fast membership in the
     # traversal hot path); None for the full game.
     allowed = (frozenset(cfg.stage.allowed_actions)
@@ -695,7 +763,7 @@ def main() -> None:
 
     # ── Outer CFR loop ─────────────────────────────────────────────────────
     t_total_start = time.time()
-    for t in range(1, cfg.train.n_iterations + 1):
+    for t in range(start_iter + 1, cfg.train.n_iterations + 1):
         print(f"\n[cfr_coro] ════════════ iteration t={t}/{cfg.train.n_iterations} ════════════")
 
         t_collect_start = time.time()
@@ -713,6 +781,7 @@ def main() -> None:
             starting_stack_chips=cfg.stage.starting_stack_chips,
             allowed=allowed,
             regret_scale=regret_scale,
+            max_raises_per_street=max_raises,
         )
         wall = time.time() - t_collect_start
         print(f"  collected K={stats['n_traversals']} in {wall:.1f}s "
@@ -763,12 +832,40 @@ def main() -> None:
             save_checkpoint(path, adv_nets, policy_net, t, cfg)
             print(f"  saved {path}")
 
+        # ── Periodic AVERAGE-strategy harvest + per-street GTO probe ─────────
+        # Train the PolicyNet (the average strategy = the actual GTO estimate)
+        # on the strategy buffer, checkpoint it, and read AA/72o's mean action
+        # mix at preflop/flop/turn/river. Unlike the AdvNet probe above (current
+        # iterate, preflop-only), this tracks how the converging average evolves.
+        if (args.policy_every_iter > 0 and t % args.policy_every_iter == 0):
+            print(f"\n  [policy-harvest t={t}] training PolicyNet on "
+                  f"{len(pol_buf):,} samples ...")
+            pr = train_policy_net(policy_net, pol_buf, cfg, device,
+                                  use_linear_cfr=use_linear)
+            print(f"    loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
+                  f"wall={pr['wall_s']:.1f}s")
+            ppath = ckpt_dir / f"cfr_policy_iter_{t:04d}.ckpt"
+            save_checkpoint(ppath, adv_nets, policy_net, t, cfg)
+            print(f"    saved {ppath}")
+            for r in run_policy_street_probes(policy_net, device,
+                                              n_hands=args.policy_probe_hands,
+                                              base_seed=cfg.run.seed + t * 6271):
+                print(format_street_probe(r, iter_t=t))
+            for net in adv_nets:
+                net.train(True)
+
     # ── Final policy training ──────────────────────────────────────────────
     print(f"\n[cfr_coro] training PolicyNet on {len(pol_buf):,} samples")
     pr = train_policy_net(policy_net, pol_buf, cfg, device,
                           use_linear_cfr=use_linear)
     print(f"  loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
           f"wall={pr['wall_s']:.1f}s")
+
+    # Final per-street read of the average strategy (AA/72o, preflop→river).
+    for r in run_policy_street_probes(policy_net, device,
+                                      n_hands=args.policy_probe_hands,
+                                      base_seed=cfg.run.seed + 777):
+        print(format_street_probe(r))
 
     final = ckpt_dir / "cfr_final.ckpt"
     save_checkpoint(final, adv_nets, policy_net,

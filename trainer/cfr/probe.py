@@ -56,7 +56,7 @@ import torch
 
 import pokertrainer_engine as pte
 
-from evaluate.policies import CFRAdvPolicy, RandomPolicy
+from evaluate.policies import CFRAdvPolicy, CFRPolicyNetPolicy, RandomPolicy
 from evaluate.match import NUM_ACTIONS, SLOT_LABELS
 
 
@@ -337,3 +337,117 @@ def format_probe_line(r: ProbeResult, iter_t: int | None = None) -> str:
               f"({r.seeds_tried:>6} seeds, {r.elapsed_s:>4.1f}s)  "
               f"net={r.mbb_per_hand:+7.0f} mbb/hand")
     return "\n".join([header, *r.preflop_breakdown_lines()])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PER-STREET PROBE OF THE AVERAGE STRATEGY (PolicyNet)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The probes above read the AdvNet *current iterate* (regret matching) and only
+# bucket preflop. This one reads the trained PolicyNet — the *average* strategy,
+# i.e. the actual GTO estimate (the proof: only the average converges, never the
+# current iterate) — and reports AA / 72o's mean action distribution at EACH
+# street (preflop / flop / turn / river). To reach the later streets reliably the
+# opponent here is a calling station (never folds, never raises), so a hand the
+# hero does not fold runs to showdown and we get flop/turn/river samples.
+
+_STREET_NAMES = ("preflop", "flop", "turn", "river")
+_CHECK_CALL = 1
+
+
+@dataclass
+class StreetProbeResult:
+    label: str
+    dist_sum: np.ndarray     # (4, NUM_ACTIONS) summed strategy per street
+    counts: np.ndarray       # (4,) number of hero decisions seen per street
+    n_hands: int
+    seeds_tried: int
+    elapsed_s: float
+
+    def mean_per_street(self) -> np.ndarray:
+        c = np.maximum(self.counts[:, None], 1)
+        return self.dist_sum / c
+
+
+def _calling_station_idx(obs) -> int:
+    """Local legal index of CHECK_CALL (always legal in HU NLHE)."""
+    for i, at in enumerate(obs.legal):
+        if int(at) == _CHECK_CALL:
+            return i
+    return 0
+
+
+def _play_one_street(env, hero: CFRPolicyNetPolicy, hero_seat: int,
+                     rng: np.random.Generator,
+                     dist_sum: np.ndarray, counts: np.ndarray) -> None:
+    """Play to terminal; hero = PolicyNet, opponent = calling station. At each
+    hero decision accumulate the policy's full distribution into the hero's
+    current street bucket."""
+    while not env.is_terminal():
+        actor = int(env.to_act())
+        obs = env.observation()
+        if actor == hero_seat:
+            street = int(env.state().street)            # 0..3 preflop..river
+            if 0 <= street <= 3 and len(obs.legal) > 1:
+                dist_sum[street] += hero.distribution_with_env(env)
+                counts[street] += 1
+            env.step(_calling_station_idx(obs) if len(obs.legal) == 1
+                     else _sample_local(hero, env, obs, rng))
+        else:
+            env.step(_calling_station_idx(obs))
+
+
+def _sample_local(hero: CFRPolicyNetPolicy, env, obs, rng) -> int:
+    sigma = hero.distribution_with_env(env)
+    legal_int = np.array([int(at) for at in obs.legal], dtype=np.int64)
+    p = sigma[legal_int]
+    s = p.sum()
+    p = p / s if s > 0 else np.full(len(obs.legal), 1.0 / len(obs.legal))
+    return int(rng.choice(len(obs.legal), p=p))
+
+
+def run_policy_street_probe(policy_net, device, label: str, predicate, *,
+                            n_hands: int = 400, max_searches: int = 300_000,
+                            base_seed: int = 0x57EE7) -> StreetProbeResult:
+    """Play `n_hands` of `label` (alternating seats) and tally the PolicyNet's
+    mean strategy per street vs a calling station."""
+    t0 = time.time()
+    hero = CFRPolicyNetPolicy(policy_net, device, stochastic=True, name="cfr_pol")
+    env = pte.Env(base_seed)
+    rng = np.random.default_rng(base_seed ^ 0x5C0FFEE)
+    dist_sum = np.zeros((4, NUM_ACTIONS), dtype=np.float64)
+    counts = np.zeros(4, dtype=np.int64)
+    n_played = n_tried = 0
+    while n_played < n_hands and n_tried < max_searches:
+        env.reset((base_seed + n_tried) & 0xFFFFFFFFFFFFFFFF)
+        n_tried += 1
+        hero_seat = n_played % 2
+        if not predicate(env.state().hole[hero_seat]):
+            continue
+        _play_one_street(env, hero, hero_seat, rng, dist_sum, counts)
+        n_played += 1
+    return StreetProbeResult(label, dist_sum, counts, n_played, n_tried,
+                             time.time() - t0)
+
+
+def run_policy_street_probes(policy_net, device, n_hands: int = 400,
+                             base_seed: int = 0x57EE7) -> list[StreetProbeResult]:
+    return [
+        run_policy_street_probe(policy_net, device, "AA ", is_pocket_aces,
+                                n_hands=n_hands, base_seed=base_seed),
+        run_policy_street_probe(policy_net, device, "72o", is_seven_two_offsuit,
+                                n_hands=n_hands, base_seed=base_seed ^ 0xA5A5),
+    ]
+
+
+def format_street_probe(r: StreetProbeResult, iter_t: int | None = None) -> str:
+    prefix = f"[policy-probe iter={iter_t}]" if iter_t is not None else "[policy-probe]"
+    head = (f"  {prefix} {r.label} (avg strategy)  n={r.n_hands}  "
+            f"({r.seeds_tried} seeds, {r.elapsed_s:.1f}s)")
+    col = "  ".join(f"{lab:>4}" for lab in SLOT_LABELS)
+    lines = [head, f"       {'street':<8} {'n':>5}   {col}"]
+    mean = r.mean_per_street()
+    for s in range(4):
+        cells = "  ".join(f"{mean[s, a]:4.2f}" for a in range(NUM_ACTIONS))
+        lines.append(f"       {_STREET_NAMES[s]:<8} {int(r.counts[s]):>5}   {cells}")
+    return "\n".join(lines)
