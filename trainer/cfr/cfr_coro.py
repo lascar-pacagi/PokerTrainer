@@ -680,12 +680,29 @@ def main() -> None:
         args.oracle_deals = 200_000
 
     torch.manual_seed(cfg.run.seed)
-    device = torch.device(args.device)
+    # Distributed (multi-GPU DDP): active only under torchrun (WORLD_SIZE>1);
+    # otherwise a disabled DistInfo → the exact single-process path as before.
+    from . import distributed as ddist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    dist = ddist.setup(default_device=args.device)
+    device = dist.device
     if device.type == "cuda" and not torch.cuda.is_available():
         raise SystemExit(f"--device={args.device} but CUDA unavailable")
 
+    # Only rank 0 logs / probes / checkpoints; other ranks stay quiet.
+    def log(*a, **k):
+        if dist.is_main:
+            print(*a, **k)
+    if dist.enabled:
+        log(f"[cfr_coro] DDP: world_size={dist.world_size} "
+            f"(rank {dist.rank} on {device}); refit + collection sharded "
+            f"across ranks, effective batch = {dist.world_size}×"
+            f"{cfg.optim.batch_size}.")
+
     ckpt_dir = Path(cfg.run.ckpt_dir)
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    if dist.is_main:
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ddist.barrier(dist)
 
     # ── Build nets directly on GPU (single process, no fork concerns) ──────
     # No share_memory / forkserver dance. We're one process, we have one
@@ -708,7 +725,10 @@ def main() -> None:
     # zero-regression resume when --no-save-buffers is not set. If buffers are
     # NOT available, refit_adv_net's warm-up scaling protects the loaded net from
     # a cold-buffer overfit. --no-resume forces fresh; --resume-from picks a file.
-    buffers_path = ckpt_dir / "cfr_buffers.npz"
+    # Buffers are sharded per rank under DDP (each rank owns a reservoir shard),
+    # so each saves/restores its own file; single-process keeps the old name.
+    buffers_path = (ckpt_dir / (f"cfr_buffers_rank{dist.rank}.npz" if dist.enabled
+                                else "cfr_buffers.npz"))
     start_iter = 0
     resumed = False
     if not args.no_resume:
@@ -787,23 +807,30 @@ def main() -> None:
         print("[cfr_coro] no buffer file to restore; buffers start empty "
               "(refit warm-up will protect the loaded net as they refill).")
 
-    rng = np.random.default_rng(cfg.run.seed + 44)
+    # Rank-distinct RNG + seed offset so each rank's sharded collection explores
+    # DIFFERENT hands (otherwise all ranks would traverse identical trees and DDP
+    # would just average identical gradients — no data-parallel benefit).
+    rng = np.random.default_rng(cfg.run.seed + 44 + dist.rank * 7_000_003)
+    # Shard the traversal budget across ranks (rank 0 absorbs the remainder).
+    K_total = cfg.train.n_traversals_per_iter
+    K_local = K_total // dist.world_size + (
+        K_total % dist.world_size if dist.is_main else 0)
 
     # ── Outer CFR loop ─────────────────────────────────────────────────────
     t_total_start = time.time()
     for t in range(start_iter + 1, cfg.train.n_iterations + 1):
-        print(f"\n[cfr_coro] ════════════ iteration t={t}/{cfg.train.n_iterations} ════════════")
+        log(f"\n[cfr_coro] ════════════ iteration t={t}/{cfg.train.n_iterations} ════════════")
 
         t_collect_start = time.time()
         stats = run_K_traversals(
-            K=cfg.train.n_traversals_per_iter,
+            K=K_local,
             adv_nets_gpu=adv_nets,
             adv_bufs=adv_bufs,
             pol_buf=pol_buf,
             n_virtual=args.n_virtual,
             t=t,
             rng=rng,
-            base_seed=cfg.run.seed + t * 100,
+            base_seed=cfg.run.seed + t * 100 + dist.rank * 1_000_003,
             device=device,
             max_depth=args.max_depth,
             starting_stack_chips=cfg.stage.starting_stack_chips,
@@ -812,21 +839,32 @@ def main() -> None:
             max_raises_per_street=max_raises,
         )
         wall = time.time() - t_collect_start
-        print(f"  collected K={stats['n_traversals']} in {wall:.1f}s "
-              f"({wall*1000/max(1,stats['n_traversals']):.0f} ms/traversal)  "
-              f"adv_buf=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}]  "
-              f"pol_buf={len(pol_buf):,}")
+        log(f"  collected K={stats['n_traversals']}×{dist.world_size}ranks in "
+            f"{wall:.1f}s ({wall*1000/max(1,stats['n_traversals']):.0f} ms/trav)  "
+            f"adv_buf(rank0)=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}]  "
+            f"pol_buf={len(pol_buf):,}")
 
-        # Refit AdvNets. No CPU sync needed — actors and learner share the
-        # same nets in this architecture (they ARE the same Python objects).
+        # Refit AdvNets. Under DDP each net is wrapped so its forward all-reduces
+        # gradients across ranks; DDP construction also broadcasts rank-0's
+        # (freshly re-initialized) weights, so every rank starts the refit from
+        # identical parameters even though reset_adv_net_each_iter re-inits with a
+        # rank-distinct RNG. After the refit the weights are identical on all
+        # ranks (gradients were averaged), so collection next iter is consistent.
         for p in (0, 1):
             if cfg.train.reset_adv_net_each_iter:
                 adv_nets[p] = AdvNet(cfg.model).to(device)
-            print(f"  refit adv_net[p={p}] on {len(adv_bufs[p])} samples ...")
+            log(f"  refit adv_net[p={p}] on {len(adv_bufs[p])} samples/rank ...")
+            fwd = (DDP(adv_nets[p],
+                       device_ids=([dist.local_rank] if device.type == "cuda"
+                                   else None))
+                   if dist.enabled else None)
             r = refit_adv_net(adv_nets[p], adv_bufs[p], cfg, device,
-                              use_linear_cfr=use_linear)
-            print(f"    loss: first={r['loss_first']:.2f} last={r['loss_last']:.2f} "
-                  f"wall={r['wall_s']:.1f}s")
+                              use_linear_cfr=use_linear,
+                              forward_module=fwd, world_size=dist.world_size,
+                              distributed=dist.enabled, verbose=dist.is_main)
+            del fwd   # drop the DDP wrapper; keep the trained adv_nets[p]
+            log(f"    loss: first={r['loss_first']:.2f} last={r['loss_last']:.2f} "
+                f"wall={r['wall_s']:.1f}s")
 
         # ── Learning probes ────────────────────────────────────────────────
         # Cheap "is the net learning poker?" signal: play the freshly-refit
@@ -835,7 +873,7 @@ def main() -> None:
         # is what tells you the policy is hand-strength-aware.
         # CFRAdvPolicy(__init__) puts nets in eval mode; we restore train
         # mode afterwards so the next iteration's refit isn't surprised.
-        if args.probe_every_iter > 0 and t % args.probe_every_iter == 0:
+        if dist.is_main and args.probe_every_iter > 0 and t % args.probe_every_iter == 0:
             if pushfold_oracle is not None:
                 # Stage-1: score the net's whole jam/call range vs Nash.
                 rep = run_pushfold_validation(
@@ -856,26 +894,30 @@ def main() -> None:
 
         if (args.checkpoint_every_iter > 0
                 and t % args.checkpoint_every_iter == 0):
-            path = ckpt_dir / f"cfr_iter_{t:04d}.ckpt"
-            save_checkpoint(path, adv_nets, policy_net, t, cfg)
-            print(f"  saved {path}")
-            # Persist the reservoirs (the training data) for exact resume. Rolling
-            # single file, written atomically; the net ckpt above is per-iteration.
+            # Net checkpoint: rank 0 only (all ranks hold identical synced nets).
+            if dist.is_main:
+                path = ckpt_dir / f"cfr_iter_{t:04d}.ckpt"
+                save_checkpoint(path, adv_nets, policy_net, t, cfg)
+                print(f"  saved {path}")
+            # Buffers: EACH rank persists its OWN shard (the data lives sharded).
             if not args.no_save_buffers:
                 bt0 = time.time()
                 save_buffers(str(buffers_path), named_bufs, t)
-                print(f"  saved buffers → {buffers_path} "
-                      f"(adv=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}] "
-                      f"pol={len(pol_buf):,}, {time.time()-bt0:.1f}s)")
+                log(f"  saved buffers → {buffers_path.name} per rank "
+                    f"(rank0 adv=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}] "
+                    f"pol={len(pol_buf):,}, {time.time()-bt0:.1f}s)")
 
         # ── Periodic AVERAGE-strategy harvest + per-street GTO probe ─────────
         # Train the PolicyNet (the average strategy = the actual GTO estimate)
         # on the strategy buffer, checkpoint it, and read AA/72o's mean action
         # mix at preflop/flop/turn/river. Unlike the AdvNet probe above (current
         # iterate, preflop-only), this tracks how the converging average evolves.
-        if (args.policy_every_iter > 0 and t % args.policy_every_iter == 0):
+        # Policy harvest on rank 0 only (trains on rank 0's strategy shard — a
+        # representative ~1/world_size sample, ample for the average-policy
+        # diagnostic). Other ranks idle until the end-of-iteration barrier.
+        if dist.is_main and args.policy_every_iter > 0 and t % args.policy_every_iter == 0:
             print(f"\n  [policy-harvest t={t}] training PolicyNet on "
-                  f"{len(pol_buf):,} samples ...")
+                  f"{len(pol_buf):,} samples (rank0 shard) ...")
             pr = train_policy_net(policy_net, pol_buf, cfg, device,
                                   use_linear_cfr=use_linear)
             print(f"    loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
@@ -890,24 +932,31 @@ def main() -> None:
             for net in adv_nets:
                 net.train(True)
 
-    # ── Final policy training ──────────────────────────────────────────────
-    print(f"\n[cfr_coro] training PolicyNet on {len(pol_buf):,} samples")
-    pr = train_policy_net(policy_net, pol_buf, cfg, device,
-                          use_linear_cfr=use_linear)
-    print(f"  loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
-          f"wall={pr['wall_s']:.1f}s")
+        # Resync all ranks before the next iteration's DDP refit (rank 0 may have
+        # spent time in the probe/checkpoint/policy blocks above).
+        ddist.barrier(dist)
 
-    # Final per-street read of the average strategy (AA/72o, preflop→river).
-    for r in run_policy_street_probes(policy_net, device,
-                                      n_hands=args.policy_probe_hands,
-                                      base_seed=cfg.run.seed + 777):
-        print(format_street_probe(r))
+    # ── Final policy training (rank 0) ──────────────────────────────────────
+    if dist.is_main:
+        print(f"\n[cfr_coro] training PolicyNet on {len(pol_buf):,} samples")
+        pr = train_policy_net(policy_net, pol_buf, cfg, device,
+                              use_linear_cfr=use_linear)
+        print(f"  loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
+              f"wall={pr['wall_s']:.1f}s")
+        # Final per-street read of the average strategy (AA/72o, preflop→river).
+        for r in run_policy_street_probes(policy_net, device,
+                                          n_hands=args.policy_probe_hands,
+                                          base_seed=cfg.run.seed + 777):
+            print(format_street_probe(r))
 
-    final = ckpt_dir / "cfr_final.ckpt"
-    save_checkpoint(final, adv_nets, policy_net,
-                    cfg.train.n_iterations, cfg)
-    print(f"\n[cfr_coro] DONE total wall={time.time()-t_total_start:.1f}s "
-          f"saved {final}")
+    if dist.is_main:
+        final = ckpt_dir / "cfr_final.ckpt"
+        save_checkpoint(final, adv_nets, policy_net,
+                        cfg.train.n_iterations, cfg)
+        print(f"\n[cfr_coro] DONE total wall={time.time()-t_total_start:.1f}s "
+              f"saved {final}")
+    ddist.barrier(dist)
+    ddist.cleanup(dist)
 
 
 if __name__ == "__main__":

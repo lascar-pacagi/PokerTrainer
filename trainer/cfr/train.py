@@ -38,13 +38,26 @@ def refit_adv_net(net: AdvNet,
                   buf: ReservoirBuffer,
                   cfg: CFRConfig,
                   device: torch.device,
-                  use_linear_cfr: bool) -> dict:
+                  use_linear_cfr: bool,
+                  *,
+                  forward_module=None,
+                  world_size: int = 1,
+                  distributed: bool = False,
+                  verbose: bool = True) -> dict:
     """Train `net` from its current weights on `buf` for n_grad_steps.
 
     Loss is per-sample MSE between predicted regrets and stored regrets,
     optionally weighted by the stored iteration `t` (Linear CFR).
-    """
+
+    DDP (multi-GPU): pass the DDP-wrapped module as `forward_module` (its forward
+    all-reduces gradients onto `net`'s parameters, which the optimizer owns) and
+    `world_size`/`distributed=True`. Each rank samples from its OWN reservoir
+    shard `buf`; gradients are averaged across ranks, so the effective batch is
+    `world_size * batch` over the union of shards. The warm-up/epoch cap uses
+    that effective batch, and the step count is min-reduced across ranks (all
+    ranks MUST run the same number of DDP steps or the all-reduce deadlocks)."""
     net.train(True)
+    fwd = forward_module if forward_module is not None else net
     opt = torch.optim.Adam(net.parameters(),
                            lr=cfg.optim.lr,
                            weight_decay=cfg.optim.weight_decay)
@@ -55,14 +68,26 @@ def refit_adv_net(net: AdvNet,
     # buffer is large (min() keeps the full count): e.g. at 7M samples / batch
     # 1024, even 10 epochs is ~68k >> 15k, so steady-state is unchanged; at 76k
     # samples it caps ~740 steps (10 epochs) instead of 15k (≈200 epochs).
+    # Under DDP each step processes world_size*batch samples over the union of
+    # shards, so the epoch math uses that effective batch (and naturally needs
+    # fewer steps for the same data).
     refit_max_epochs = float(getattr(cfg.optim, "refit_max_epochs", 10.0))
     n_filled = len(buf)
+    eff_batch = cfg.optim.batch_size * max(1, world_size)
     full_steps = cfg.optim.n_grad_steps_per_refit
-    warm_cap = max(1, int(refit_max_epochs * max(1, n_filled) / cfg.optim.batch_size))
+    warm_cap = max(1, int(refit_max_epochs * max(1, n_filled) * max(1, world_size)
+                          / eff_batch))
     n_steps = min(full_steps, warm_cap)
-    if n_steps < full_steps:
-        print(f"      [warm-up] buffer={n_filled:,} → refit {n_steps}/{full_steps} "
-              f"steps (~{refit_max_epochs:g} epochs) to protect the net")
+    if distributed:
+        # Shards differ by a few samples → step counts could differ by 1, which
+        # would deadlock the gradient all-reduce. Agree on the minimum.
+        from . import distributed as ddist
+        n_steps = ddist.all_reduce_min_int(
+            n_steps, ddist.DistInfo(True, 0, world_size, 0, device))
+    if verbose and n_steps < full_steps:
+        print(f"      [warm-up] buffer={n_filled:,} (×{world_size} ranks) → refit "
+              f"{n_steps}/{full_steps} steps (~{refit_max_epochs:g} epochs) "
+              f"to protect the net")
     losses: list[float] = []
     last_log_step = 0
     t_start = time.time()
@@ -74,7 +99,7 @@ def refit_adv_net(net: AdvNet,
         target   = torch.from_numpy(batch.target).to(device)
         weight   = torch.from_numpy(batch.t).to(device) if use_linear_cfr else None
 
-        pred = net(tokens, pad_mask, dpos)                       # (B, NUM_ACTIONS)
+        pred = fwd(tokens, pad_mask, dpos)                       # (B, NUM_ACTIONS)
         # NOTE (paper deviation, benign): mean over ALL NUM_ACTIONS slots —
         # illegal slots carry target 0, so the net also learns "0 on illegal".
         # This dilutes the printed loss (e.g. 3-legal/11 ⇒ ~8/11 of the terms
@@ -93,7 +118,7 @@ def refit_adv_net(net: AdvNet,
         gn = nn.utils.clip_grad_norm_(net.parameters(), cfg.optim.grad_clip)
         opt.step()
         losses.append(float(loss.item()))
-        if step - last_log_step >= max(1, n_steps // 4):
+        if verbose and step - last_log_step >= max(1, n_steps // 4):
             last_log_step = step
             print(f"      refit step={step}/{n_steps} loss={loss.item():.3f} "
                   f"grad={float(gn):.2f}")

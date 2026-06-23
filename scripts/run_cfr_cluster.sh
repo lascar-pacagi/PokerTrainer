@@ -61,6 +61,18 @@ POL_CAP="${POL_CAP:-40000000}"
 DEVICE="${DEVICE:-cuda:0}"
 SEED="${SEED:-42}"
 
+# ── Multi-GPU (DDP) ─────────────────────────────────────────────────────────
+# NPROC>1 launches one process per GPU via torchrun; each rank pins cuda:LOCAL_RANK,
+# shards collection, and the AdvNet refit (the ~95% bottleneck) runs data-parallel
+# with all-reduced gradients → ~NPROC× refit throughput + effective batch
+# NPROC×batch. NPROC=1 keeps the exact single-process path (plain python -m).
+# Default: all visible GPUs. NOTE on heterogeneous GPUs (e.g. A40 + RTX 8000):
+# DDP runs at the SLOWEST GPU's pace; if NCCL stalls across arch generations, try
+# NCCL_P2P_DISABLE=1. To use only the matched GPUs, set CUDA_VISIBLE_DEVICES.
+NPROC="${NPROC:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
+[[ "$NPROC" -ge 1 ]] 2>/dev/null || NPROC=1
+MASTER_PORT="${MASTER_PORT:-29500}"
+
 # ── Curriculum stage 1: short-stack push/fold ───────────────────────────────
 # STACK_BB sets the effective starting stack (bb). PUSH_FOLD=1 restricts the
 # traversal to FOLD/CALL/ALL_IN and switches the per-iter diagnostic to the
@@ -112,13 +124,22 @@ echo "[run_cfr_cluster] actors=$ACTORS iters=$ITERS K=$K"
 echo "[run_cfr_cluster] d_model=$D_MODEL layers=$LAYERS heads=$N_HEADS d_ff=$D_FF device=$DEVICE"
 echo "[run_cfr_cluster] stage: stack_bb=$STACK_BB push_fold=$PUSH_FOLD oracle_deals=$ORACLE_DEALS"
 echo "[run_cfr_cluster] tree: max_raises=$MAX_RAISES policy_every=$POLICY_EVERY save_buffers=$SAVE_BUFFERS ckpt_every=$CKPT_EVERY"
+echo "[run_cfr_cluster] ddp: nproc=$NPROC (1 ⇒ single-process; >1 ⇒ torchrun multi-GPU)"
 echo "[run_cfr_cluster] resume: auto from latest cfr_iter_*.ckpt in ckpt-dir (empty dir ⇒ fresh)"
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv || true
+
+# NPROC>1 → torchrun (one rank per GPU); NPROC==1 → plain python (unchanged path).
+if [[ "$NPROC" -gt 1 ]]; then
+    LAUNCH=(torchrun --standalone --nnodes=1 --nproc_per_node="$NPROC"
+            --master_port="$MASTER_PORT" -m cfr.cfr_coro)
+else
+    LAUNCH=(python3 -m cfr.cfr_coro)
+fi
 
 singularity exec --nv \
     --bind "$CKPT_DIR:$CKPT_DIR" \
     "$SIF" \
-    python3 -m cfr.cfr_coro \
+    "${LAUNCH[@]}" \
         --n-virtual           "$ACTORS" \
         --device              "$DEVICE" \
         --n-iterations        "$ITERS" \
