@@ -15,15 +15,25 @@
 # Usage:
 #   bash scripts/run_cfr_cluster.sh /path/to/pokertrainer-cfr.sif /scratch/$USER/cfr_run
 #
-# Override defaults via env:
-#   ACTORS=32 ITERS=500 K=10000 D_MODEL=256 LAYERS=6 \
-#       bash scripts/run_cfr_cluster.sh ...
-#   MAX_RAISES=3 POLICY_EVERY=100 SAVE_BUFFERS=1 CKPT_EVERY=10 \
-#       bash scripts/run_cfr_cluster.sh ...
+# Recommended defaults are baked in (multi-GPU DDP + AMP + atomic resume), so the
+# bare command is the recommended run:
+#   bash scripts/run_cfr_cluster.sh cfr.sif /scratch/$USER/cfr_run
+# Defaults: NPROC=all GPUs, AMP=1, ADV_GRAD_STEPS=3000 (DDP) / 5000 (1 GPU),
+#           MAX_RAISES=3, POLICY_EVERY=100, SAVE_BUFFERS=1, CKPT_EVERY=20.
+# Override any via env, e.g.:
+#   AMP=0 ADV_GRAD_STEPS=5000 CKPT_EVERY=50 bash scripts/run_cfr_cluster.sh ...
 #
-# Resume is AUTOMATIC: re-launching with the SAME ckpt-dir picks up the latest
-# cfr_iter_*.ckpt (+ cfr_buffers.npz if SAVE_BUFFERS=1) and continues. A fresh
-# run just needs an empty ckpt-dir.
+# Resume is AUTOMATIC: re-launching with the SAME ckpt-dir (and SAME NPROC, see
+# below) picks up the latest cfr_iter_*.ckpt + per-rank cfr_buffers_rank*.npz and
+# continues. A fresh run just needs an empty ckpt-dir.
+#
+# ⚠ Keep NPROC CONSTANT across restarts for an exact resume. The reservoir
+# buffers are sharded one-file-per-rank, so changing the GPU count orphans the
+# shards whose rank index no longer exists (3→2 GPU drops cfr_buffers_rank2.npz,
+# ~1/N of the data) or leaves new ranks with empty buffers (2→3 GPU). The NETS
+# always resume regardless; only buffer data is lost, and the refit warm-up
+# protects the loaded nets while the kept shards refill. If you expect to vary
+# the GPU count, run SAVE_BUFFERS=0 (nets-only resume, no shard mismatch).
 #
 # NOTE: the image embeds /opt/pokertrainer/trainer at BUILD time. After changing
 # trainer code, REBUILD the .sif (or bind-mount the repo over the container path)
@@ -47,7 +57,10 @@ CKPT_DIR="${2:?ckpt-dir required (e.g. /scratch/$USER/cfr_run)}"
 ACTORS="${ACTORS:-64}"
 ITERS="${ITERS:-1000}"
 K="${K:-1000}"
-ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-5000}"
+# ADV_GRAD_STEPS default is decided AFTER NPROC is known (below): 3000 under DDP
+# — where each step sees NPROC×batch, so 3000 steps still refit on more data than
+# the old single-GPU 5000 — vs 5000 single-GPU (3000 there would under-fit).
+ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-}"
 POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-50000}"
 # weight_decay default 0: a controlled diagnostic showed 1e-3 freezes the AdvNet
 # to a constant action (kills hole-card discrimination). See cfr_coro.py.
@@ -73,6 +86,11 @@ NPROC="${NPROC:-$(nvidia-smi -L 2>/dev/null | wc -l)}"
 [[ "$NPROC" -ge 1 ]] 2>/dev/null || NPROC=1
 MASTER_PORT="${MASTER_PORT:-29500}"
 
+# Resolve the refit-step default now that NPROC is known (see note above).
+if [[ -z "$ADV_GRAD_STEPS" ]]; then
+    if [[ "$NPROC" -gt 1 ]]; then ADV_GRAD_STEPS=3000; else ADV_GRAD_STEPS=5000; fi
+fi
+
 # ── Curriculum stage 1: short-stack push/fold ───────────────────────────────
 # STACK_BB sets the effective starting stack (bb). PUSH_FOLD=1 restricts the
 # traversal to FOLD/CALL/ALL_IN and switches the per-iter diagnostic to the
@@ -94,10 +112,13 @@ ORACLE_DEALS="${ORACLE_DEALS:-12000000}"
 MAX_RAISES="${MAX_RAISES:-3}"
 POLICY_EVERY="${POLICY_EVERY:-100}"
 SAVE_BUFFERS="${SAVE_BUFFERS:-1}"
-CKPT_EVERY="${CKPT_EVERY:-50}"
+# CKPT_EVERY=20: a cluster wall-time kill loses up to this many iterations, so
+# keep it modest for the 15-day-limit → restart workflow (the buffer write is a
+# few seconds on scratch). Raise it only if buffer I/O is a measured problem.
+CKPT_EVERY="${CKPT_EVERY:-20}"
 # AMP=1 → fp16 mixed precision on the refit/policy training (~1.5-2× on top of
-# DDP; fp16 is portable across the Turing+Ampere mix). Off by default.
-AMP="${AMP:-0}"
+# DDP; fp16 is portable across the Turing+Ampere mix). On by default; AMP=0 off.
+AMP="${AMP:-1}"
 
 EXTRA_FLAGS=(--max-raises-per-street "$MAX_RAISES"
              --policy-every-iter "$POLICY_EVERY"
