@@ -34,6 +34,25 @@ from .models import AdvNet, PolicyNet
 
 # ─── AdvNet refit ───────────────────────────────────────────────────────────
 
+def _amp_tools(amp: bool, device: torch.device):
+    """(autocast-context factory, GradScaler, enabled) for mixed precision.
+
+    AMP runs the matmul-heavy forward/backward in fp16 (Tensor Cores → ~1.5-2×
+    on a transformer) while keeping fp32 master weights; the GradScaler scales
+    the loss so fp16 gradients don't underflow, and skips the optimizer step if
+    it ever sees inf/nan. fp16 is portable across this project's GPUs (Turing
+    RTX 8000 + Ampere A40; bf16 would exclude Turing). Only meaningful on CUDA —
+    on CPU (or --amp off) everything is enabled=False and the path is identical
+    to plain fp32."""
+    use = bool(amp) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda", enabled=use)
+
+    def ctx():
+        return torch.amp.autocast(device_type="cuda" if device.type == "cuda"
+                                  else "cpu", dtype=torch.float16, enabled=use)
+    return ctx, scaler, use
+
+
 def refit_adv_net(net: AdvNet,
                   buf: ReservoirBuffer,
                   cfg: CFRConfig,
@@ -43,6 +62,7 @@ def refit_adv_net(net: AdvNet,
                   forward_module=None,
                   world_size: int = 1,
                   distributed: bool = False,
+                  amp: bool = False,
                   verbose: bool = True) -> dict:
     """Train `net` from its current weights on `buf` for n_grad_steps.
 
@@ -88,6 +108,7 @@ def refit_adv_net(net: AdvNet,
         print(f"      [warm-up] buffer={n_filled:,} (×{world_size} ranks) → refit "
               f"{n_steps}/{full_steps} steps (~{refit_max_epochs:g} epochs) "
               f"to protect the net")
+    amp_ctx, scaler, _ = _amp_tools(amp, device)
     losses: list[float] = []
     last_log_step = 0
     t_start = time.time()
@@ -99,24 +120,30 @@ def refit_adv_net(net: AdvNet,
         target   = torch.from_numpy(batch.target).to(device)
         weight   = torch.from_numpy(batch.t).to(device) if use_linear_cfr else None
 
-        pred = fwd(tokens, pad_mask, dpos)                       # (B, NUM_ACTIONS)
-        # NOTE (paper deviation, benign): mean over ALL NUM_ACTIONS slots —
-        # illegal slots carry target 0, so the net also learns "0 on illegal".
-        # This dilutes the printed loss (e.g. 3-legal/11 ⇒ ~8/11 of the terms
-        # are near-zero) but regret matching re-masks at use time. Masking the
-        # loss to legal slots would need the legal mask stored in the buffer.
-        per_sample_mse = ((pred - target) ** 2).mean(dim=-1)     # (B,)
-        if weight is not None:
-            # Normalize weights so the magnitude doesn't drift with iter.
-            w = weight / weight.mean().clamp(min=1.0)
-            loss = (per_sample_mse * w).mean()
-        else:
-            loss = per_sample_mse.mean()
+        with amp_ctx():
+            pred = fwd(tokens, pad_mask, dpos)                   # (B, NUM_ACTIONS)
+            # NOTE (paper deviation, benign): mean over ALL NUM_ACTIONS slots —
+            # illegal slots carry target 0, so the net also learns "0 on illegal".
+            # This dilutes the printed loss (e.g. 3-legal/11 ⇒ ~8/11 of the terms
+            # are near-zero) but regret matching re-masks at use time. Masking the
+            # loss to legal slots would need the legal mask stored in the buffer.
+            per_sample_mse = ((pred - target) ** 2).mean(dim=-1)  # (B,)
+            if weight is not None:
+                # Normalize weights so the magnitude doesn't drift with iter.
+                w = weight / weight.mean().clamp(min=1.0)
+                loss = (per_sample_mse * w).mean()
+            else:
+                loss = per_sample_mse.mean()
 
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        # AMP-safe step: scale → backward → unscale (so the clip sees true-scale
+        # grads) → clip → step (skipped by the scaler if it saw inf/nan) → update.
+        # All no-ops when AMP is disabled, so the fp32 path is unchanged.
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         gn = nn.utils.clip_grad_norm_(net.parameters(), cfg.optim.grad_clip)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         losses.append(float(loss.item()))
         if verbose and step - last_log_step >= max(1, n_steps // 4):
             last_log_step = step
@@ -136,18 +163,21 @@ def train_policy_net(policy_net: PolicyNet,
                      buf: ReservoirBuffer,
                      cfg: CFRConfig,
                      device: torch.device,
-                     use_linear_cfr: bool) -> dict:
+                     use_linear_cfr: bool,
+                     *,
+                     amp: bool = False) -> dict:
     """Train PolicyNet on the policy buffer once at the end.
 
     Loss: per-sample cross-entropy with soft strategy targets, masked by
     the strategy itself (illegal slots have target probability 0, so they
-    contribute 0 to the CE sum naturally).
+    contribute 0 to the CE sum naturally). `amp` → fp16 autocast (see _amp_tools).
     """
     policy_net.train(True)
     opt = torch.optim.Adam(policy_net.parameters(),
                            lr=cfg.optim.lr,
                            weight_decay=cfg.optim.weight_decay)
     n_steps = cfg.train.policy_n_grad_steps
+    amp_ctx, scaler, _ = _amp_tools(amp, device)
     losses: list[float] = []
     t_start = time.time()
     last_log_step = 0
@@ -165,20 +195,25 @@ def train_policy_net(policy_net: PolicyNet,
         legal_mask = torch.where(all_zero, torch.ones_like(legal_mask), legal_mask)
         weight = torch.from_numpy(batch.t).to(device) if use_linear_cfr else None
 
-        logits = policy_net.forward_logits(tokens, pad_mask, dpos)
-        masked = logits.masked_fill(legal_mask < 0.5, -1e9)
-        log_p  = nn.functional.log_softmax(masked, dim=-1)
-        ce = -(target * log_p).sum(dim=-1)                       # (B,)
-        if weight is not None:
-            w = weight / weight.mean().clamp(min=1.0)
-            loss = (ce * w).mean()
-        else:
-            loss = ce.mean()
+        with amp_ctx():
+            logits = policy_net.forward_logits(tokens, pad_mask, dpos)
+            # log_softmax in fp32 even under autocast (numerically safer); the
+            # -1e9 mask fill stays finite in fp16's range either way.
+            masked = logits.masked_fill(legal_mask < 0.5, -1e9)
+            log_p  = nn.functional.log_softmax(masked.float(), dim=-1)
+            ce = -(target * log_p).sum(dim=-1)                   # (B,)
+            if weight is not None:
+                w = weight / weight.mean().clamp(min=1.0)
+                loss = (ce * w).mean()
+            else:
+                loss = ce.mean()
 
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         gn = nn.utils.clip_grad_norm_(policy_net.parameters(), cfg.optim.grad_clip)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         losses.append(float(loss.item()))
         if step - last_log_step >= max(1, n_steps // 10):
             last_log_step = step

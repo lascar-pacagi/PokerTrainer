@@ -591,6 +591,12 @@ def parse_args() -> argparse.Namespace:
                         "write cadence (raise it if buffer I/O dominates).")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH)
+    p.add_argument("--amp", action="store_true",
+                   help="mixed precision (fp16 autocast + GradScaler) for the "
+                        "AdvNet refit and PolicyNet training. ~1.5-2× faster on "
+                        "the matmul-heavy transformer, stacks with DDP. CUDA only "
+                        "(no-op on CPU); fp16 is portable across Turing+Ampere. "
+                        "Default off.")
     p.add_argument("--max-raises-per-street", type=int, default=0,
                    help="action-abstraction re-raise cap per street (0 = uncapped). "
                         "Once this many voluntary raises/all-ins have happened on a "
@@ -861,7 +867,8 @@ def main() -> None:
             r = refit_adv_net(adv_nets[p], adv_bufs[p], cfg, device,
                               use_linear_cfr=use_linear,
                               forward_module=fwd, world_size=dist.world_size,
-                              distributed=dist.enabled, verbose=dist.is_main)
+                              distributed=dist.enabled, amp=args.amp,
+                              verbose=dist.is_main)
             del fwd   # drop the DDP wrapper; keep the trained adv_nets[p]
             log(f"    loss: first={r['loss_first']:.2f} last={r['loss_last']:.2f} "
                 f"wall={r['wall_s']:.1f}s")
@@ -919,7 +926,7 @@ def main() -> None:
             print(f"\n  [policy-harvest t={t}] training PolicyNet on "
                   f"{len(pol_buf):,} samples (rank0 shard) ...")
             pr = train_policy_net(policy_net, pol_buf, cfg, device,
-                                  use_linear_cfr=use_linear)
+                                  use_linear_cfr=use_linear, amp=args.amp)
             print(f"    loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
                   f"wall={pr['wall_s']:.1f}s")
             ppath = ckpt_dir / f"cfr_policy_iter_{t:04d}.ckpt"
@@ -940,7 +947,7 @@ def main() -> None:
     if dist.is_main:
         print(f"\n[cfr_coro] training PolicyNet on {len(pol_buf):,} samples")
         pr = train_policy_net(policy_net, pol_buf, cfg, device,
-                              use_linear_cfr=use_linear)
+                              use_linear_cfr=use_linear, amp=args.amp)
         print(f"  loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
               f"wall={pr['wall_s']:.1f}s")
         # Final per-street read of the average strategy (AA/72o, preflop→river).

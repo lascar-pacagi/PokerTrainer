@@ -95,11 +95,15 @@ MAX_RAISES="${MAX_RAISES:-3}"
 POLICY_EVERY="${POLICY_EVERY:-100}"
 SAVE_BUFFERS="${SAVE_BUFFERS:-1}"
 CKPT_EVERY="${CKPT_EVERY:-50}"
+# AMP=1 → fp16 mixed precision on the refit/policy training (~1.5-2× on top of
+# DDP; fp16 is portable across the Turing+Ampere mix). Off by default.
+AMP="${AMP:-0}"
 
 EXTRA_FLAGS=(--max-raises-per-street "$MAX_RAISES"
              --policy-every-iter "$POLICY_EVERY"
              --checkpoint-every-iter "$CKPT_EVERY")
 [[ "$SAVE_BUFFERS" == "1" ]] || EXTRA_FLAGS+=(--no-save-buffers)
+[[ "$AMP" == "1" ]] && EXTRA_FLAGS+=(--amp)
 # SINGULARITYENV_ prefix is the reliable way to inject an env var into the
 # container; it appears inside as PT_ORACLE_CACHE. Point it at the bound,
 # writable ckpt dir (the container CWD's runs/ may be read-only).
