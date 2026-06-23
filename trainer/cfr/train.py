@@ -234,14 +234,22 @@ def save_checkpoint(path: Path,
                     policy_net: nn.Module,
                     iteration: int,
                     cfg: CFRConfig) -> None:
+    # Atomic write: serialize to a temp file, then rename into place. A cluster
+    # wall-time kill (SIGTERM→SIGKILL) mid-write would otherwise leave a
+    # truncated cfr_iter_*.ckpt that find_latest_checkpoint picks on restart and
+    # torch.load then chokes on. os.replace (Path.replace) is atomic on the same
+    # filesystem, so the final path is always either the old ckpt or a complete
+    # new one — never a partial.
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save({
         "iteration":       iteration,
         "adv_net_sb":      {k: v.detach().cpu() for k, v in adv_nets[0].state_dict().items()},
         "adv_net_bb":      {k: v.detach().cpu() for k, v in adv_nets[1].state_dict().items()},
         "policy_net":      {k: v.detach().cpu() for k, v in policy_net.state_dict().items()},
         "cfg":             cfg,
-    }, path)
+    }, tmp)
+    tmp.replace(path)
 
 
 def find_latest_checkpoint(ckpt_dir: Path) -> Optional[Path]:
