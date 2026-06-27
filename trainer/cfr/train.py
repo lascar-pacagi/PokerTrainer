@@ -197,9 +197,14 @@ def train_policy_net(policy_net: PolicyNet,
 
         with amp_ctx():
             logits = policy_net.forward_logits(tokens, pad_mask, dpos)
-            # log_softmax in fp32 even under autocast (numerically safer); the
-            # -1e9 mask fill stays finite in fp16's range either way.
-            masked = logits.masked_fill(legal_mask < 0.5, -1e9)
+            # Mask illegal slots, then log_softmax in fp32 (numerically safer).
+            # Fill with the dtype's most-negative finite value: under --amp
+            # `logits` is fp16 and a literal -1e9 overflows Half (max |x| ≈
+            # 65504), raising inside masked_fill before the .float() upcast.
+            # finfo(dtype).min is representable by construction and still drives
+            # illegal-slot probabilities to 0 after softmax.
+            masked = logits.masked_fill(legal_mask < 0.5,
+                                        torch.finfo(logits.dtype).min)
             log_p  = nn.functional.log_softmax(masked.float(), dim=-1)
             ce = -(target * log_p).sum(dim=-1)                   # (B,)
             if weight is not None:

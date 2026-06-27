@@ -180,8 +180,12 @@ class PolicyNet(nn.Module):
                 ) -> torch.Tensor:
         """Return masked-softmax strategy. Illegal slots are exactly 0."""
         logits = self.forward_logits(tokens, pad_mask, decision_pos)
-        # Set illegal slots to a large negative number so softmax masks them.
-        masked = logits.masked_fill(legal_mask < 0.5, -1e9)
+        # Set illegal slots to the dtype's most-negative finite value so softmax
+        # masks them. A literal -1e9 overflows fp16 (Half, max |x| ≈ 65504) if
+        # this ever runs under autocast; finfo(dtype).min is representable in any
+        # float dtype by construction.
+        masked = logits.masked_fill(legal_mask < 0.5,
+                                    torch.finfo(logits.dtype).min)
         return F.softmax(masked, dim=-1)
 
 
