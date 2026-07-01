@@ -23,6 +23,11 @@
 # Override any via env, e.g.:
 #   AMP=0 ADV_GRAD_STEPS=5000 CKPT_EVERY=50 bash scripts/run_cfr_cluster.sh ...
 #
+# CFR_PG_TIMEOUT_S (default 8h) bounds how long idle ranks wait in the
+# end-of-iteration barrier while rank 0 runs its solo PolicyNet harvest
+# (POLICY_GRAD_STEPS steps, still > NCCL's 10-min default even at 5000). Raise
+# it if you bump POLICY_GRAD_STEPS back up or run without AMP.
+#
 # Resume is AUTOMATIC: re-launching with the SAME ckpt-dir (and SAME NPROC, see
 # below) picks up the latest cfr_iter_*.ckpt + per-rank cfr_buffers_rank*.npz and
 # continues. A fresh run just needs an empty ckpt-dir.
@@ -61,7 +66,7 @@ K="${K:-1000}"
 # — where each step sees NPROC×batch, so 3000 steps still refit on more data than
 # the old single-GPU 5000 — vs 5000 single-GPU (3000 there would under-fit).
 ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-}"
-POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-50000}"
+POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-5000}"
 # weight_decay default 0: a controlled diagnostic showed 1e-3 freezes the AdvNet
 # to a constant action (kills hole-card discrimination). See cfr_coro.py.
 WEIGHT_DECAY="${WEIGHT_DECAY:-0}"

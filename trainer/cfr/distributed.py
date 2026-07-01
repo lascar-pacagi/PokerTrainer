@@ -15,9 +15,21 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+
+
+# Collective timeout for the process group. The NCCL default (10 min) aborts any
+# collective blocked longer than that — which kills ranks 1..N-1 while they wait
+# in the end-of-iteration barrier for rank 0 to finish its *solo* PolicyNet
+# harvest (--policy-grad-steps → minutes-to-hours of single-GPU work the other
+# ranks skip). The harvest itself runs no collectives (policy_net is not DDP-wrapped),
+# so a generous timeout simply lets the idle ranks wait it out; a genuine refit
+# deadlock is still bounded by the job's Slurm wall-time. Override via env for
+# non-AMP runs or larger --policy-grad-steps.
+_PG_TIMEOUT = timedelta(seconds=int(os.environ.get("CFR_PG_TIMEOUT_S", str(8 * 3600))))
 
 
 @dataclass
@@ -52,10 +64,10 @@ def setup(default_device: str = "cuda:0") -> DistInfo:
     if use_cuda:
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(backend="nccl", timeout=_PG_TIMEOUT)
     else:
         device = torch.device("cpu")
-        dist.init_process_group(backend="gloo")
+        dist.init_process_group(backend="gloo", timeout=_PG_TIMEOUT)
     return DistInfo(True, rank, world_size, local_rank, device)
 
 
