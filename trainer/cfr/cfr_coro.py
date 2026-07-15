@@ -117,10 +117,9 @@ from .models import AdvNet, PolicyNet, count_parameters
 from .regret_matching import regret_matching_np
 from .tokenize import TokenizedState, tokenize_state, pad_batch
 from .traversal import DEFAULT_MAX_DEPTH, REGRET_SCALE
-from .train import (refit_adv_net, train_policy_net, save_checkpoint,
+from .train import (refit_adv_net, save_checkpoint,
                     find_latest_checkpoint, load_checkpoint)
-from .probe import (run_default_probes, format_probe_line,
-                    run_policy_street_probes, format_street_probe)
+from .probe import run_default_probes, format_probe_line
 
 
 NUM_ACTIONS = 11
@@ -554,7 +553,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--n-iterations", type=int, default=100)
     p.add_argument("--n-traversals-per-iter", type=int, default=5000)
     p.add_argument("--adv-grad-steps", type=int, default=4000)
-    p.add_argument("--policy-grad-steps", type=int, default=50000)
+    p.add_argument("--policy-grad-steps", type=int, default=50000,
+                   help="DEPRECATED / ignored — average-policy training moved to "
+                        "cfr.harvest_policy (--steps there). Accepted so existing "
+                        "launchers don't break.")
     p.add_argument("--weight-decay", type=float, default=0.0,
                    help="Adam L2 on AdvNet/PolicyNet refits. NOTE: weight_decay "
                         "shrinks all weights every step and overwhelms the weak "
@@ -629,14 +631,11 @@ def parse_args() -> argparse.Namespace:
                         "SE ≈ 300 mbb/hand on the AA scenario — fine for "
                         "tracking a several-bb signal across iterations.")
     p.add_argument("--policy-every-iter", type=int, default=0,
-                   help="Every N iterations, (re)train the PolicyNet on the "
-                        "strategy buffer, checkpoint it, and run the PER-STREET "
-                        "AA/72o probe of the AVERAGE strategy (preflop/flop/turn/"
-                        "river). 0 = only at the end. This is the GTO-evolution "
-                        "signal (the average converges, the AdvNet iterate does "
-                        "not). E.g. 100.")
+                   help="DEPRECATED / ignored — the average-policy harvest is now "
+                        "offline (python -m cfr.harvest_policy). Accepted so "
+                        "existing launchers don't break.")
     p.add_argument("--policy-probe-hands", type=int, default=400,
-                   help="Hands per scenario for the per-street policy probe.")
+                   help="DEPRECATED / ignored — see cfr.harvest_policy.")
     p.add_argument("--smoke", action="store_true")
     return p.parse_args()
 
@@ -914,54 +913,33 @@ def main() -> None:
                     f"(rank0 adv=[{len(adv_bufs[0]):,},{len(adv_bufs[1]):,}] "
                     f"pol={len(pol_buf):,}, {time.time()-bt0:.1f}s)")
 
-        # ── Periodic AVERAGE-strategy harvest + per-street GTO probe ─────────
-        # Train the PolicyNet (the average strategy = the actual GTO estimate)
-        # on the strategy buffer, checkpoint it, and read AA/72o's mean action
-        # mix at preflop/flop/turn/river. Unlike the AdvNet probe above (current
-        # iterate, preflop-only), this tracks how the converging average evolves.
-        # Policy harvest on rank 0 only (trains on rank 0's strategy shard — a
-        # representative ~1/world_size sample, ample for the average-policy
-        # diagnostic). Other ranks idle until the end-of-iteration barrier.
-        if dist.is_main and args.policy_every_iter > 0 and t % args.policy_every_iter == 0:
-            print(f"\n  [policy-harvest t={t}] training PolicyNet on "
-                  f"{len(pol_buf):,} samples (rank0 shard) ...")
-            pr = train_policy_net(policy_net, pol_buf, cfg, device,
-                                  use_linear_cfr=use_linear, amp=args.amp)
-            print(f"    loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
-                  f"wall={pr['wall_s']:.1f}s")
-            ppath = ckpt_dir / f"cfr_policy_iter_{t:04d}.ckpt"
-            save_checkpoint(ppath, adv_nets, policy_net, t, cfg)
-            print(f"    saved {ppath}")
-            for r in run_policy_street_probes(policy_net, device,
-                                              n_hands=args.policy_probe_hands,
-                                              base_seed=cfg.run.seed + t * 6271):
-                print(format_street_probe(r, iter_t=t))
-            for net in adv_nets:
-                net.train(True)
+        # ── Average-strategy (PolicyNet) harvest is now OFFLINE ──────────────
+        # The average net is a separate, heavier training problem (many epochs
+        # over the full strategy reservoir) and was the rank-0-solo section that
+        # idled the other ranks for hours. It has moved out of the loop entirely:
+        # cfr_coro only COLLECTS strategy samples (pol_buf) and persists them via
+        # the buffer checkpoints above. Train the deployable policy separately
+        # with `python -m cfr.harvest_policy --ckpt-dir <this run>` (DDP across
+        # all GPUs). policy_net here stays at init and is saved only to keep the
+        # checkpoint format stable for resume/load.
 
         # Resync all ranks before the next iteration's DDP refit (rank 0 may have
-        # spent time in the probe/checkpoint/policy blocks above).
+        # spent time in the probe/checkpoint blocks above).
         ddist.barrier(dist)
 
-    # ── Final policy training (rank 0) ──────────────────────────────────────
-    if dist.is_main:
-        print(f"\n[cfr_coro] training PolicyNet on {len(pol_buf):,} samples")
-        pr = train_policy_net(policy_net, pol_buf, cfg, device,
-                              use_linear_cfr=use_linear, amp=args.amp)
-        print(f"  loss first={pr['loss_first']:.4f} last={pr['loss_last']:.4f} "
-              f"wall={pr['wall_s']:.1f}s")
-        # Final per-street read of the average strategy (AA/72o, preflop→river).
-        for r in run_policy_street_probes(policy_net, device,
-                                          n_hands=args.policy_probe_hands,
-                                          base_seed=cfg.run.seed + 777):
-            print(format_street_probe(r))
-
+    # ── Final checkpoint (rank 0) ────────────────────────────────────────────
+    # No inline PolicyNet training — the average strategy is harvested offline
+    # from the saved buffers (see cfr.harvest_policy). policy_net is saved at
+    # init only to keep the checkpoint format stable.
     if dist.is_main:
         final = ckpt_dir / "cfr_final.ckpt"
         save_checkpoint(final, adv_nets, policy_net,
                         cfg.train.n_iterations, cfg)
         print(f"\n[cfr_coro] DONE total wall={time.time()-t_total_start:.1f}s "
               f"saved {final}")
+        print(f"[cfr_coro] harvest the average policy with:\n"
+              f"    torchrun --standalone --nproc_per_node={dist.world_size} "
+              f"-m cfr.harvest_policy --ckpt-dir {ckpt_dir} --amp")
     ddist.barrier(dist)
     ddist.cleanup(dist)
 

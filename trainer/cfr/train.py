@@ -165,18 +165,36 @@ def train_policy_net(policy_net: PolicyNet,
                      device: torch.device,
                      use_linear_cfr: bool,
                      *,
-                     amp: bool = False) -> dict:
-    """Train PolicyNet on the policy buffer once at the end.
+                     forward_module=None,
+                     world_size: int = 1,
+                     distributed: bool = False,
+                     amp: bool = False,
+                     verbose: bool = True) -> dict:
+    """Train PolicyNet on the policy (average-strategy) buffer.
 
-    Loss: per-sample cross-entropy with soft strategy targets, masked by
-    the strategy itself (illegal slots have target probability 0, so they
-    contribute 0 to the CE sum naturally). `amp` → fp16 autocast (see _amp_tools).
-    """
+    Loss: per-sample cross-entropy with soft strategy targets (illegal slots
+    carry target 0, so they contribute 0 to the CE sum). `amp` → fp16 autocast.
+
+    DDP (multi-GPU offline harvest, cfr.harvest_policy): pass the DDP-wrapped
+    PolicyNet as `forward_module` and set `world_size`/`distributed=True`. Each
+    rank samples its OWN buffer shard; DDP all-reduces gradients onto
+    `policy_net`'s parameters, so one net trains over the union of shards.
+    Because `PolicyNet.forward` (the DDP entry point) returns the *masked
+    softmax*, the DDP path takes CE from log(probs) rather than log_softmax of
+    the logits — mathematically identical, done in fp32 to stay finite under
+    autocast. `n_steps` is a fixed config, identical on every rank, so (unlike
+    refit_adv_net's data-dependent warm-up cap) no step-count reduction is
+    needed to keep the ranks' all-reduces in lockstep."""
     policy_net.train(True)
+    fwd = forward_module           # None → single-process forward_logits path
     opt = torch.optim.Adam(policy_net.parameters(),
                            lr=cfg.optim.lr,
                            weight_decay=cfg.optim.weight_decay)
     n_steps = cfg.train.policy_n_grad_steps
+    if verbose and distributed:
+        print(f"  [policy] DDP world_size={world_size}, effective batch="
+              f"{cfg.train.policy_batch_size * max(1, world_size)} over the "
+              f"union of shards")
     amp_ctx, scaler, _ = _amp_tools(amp, device)
     losses: list[float] = []
     t_start = time.time()
@@ -196,16 +214,24 @@ def train_policy_net(policy_net: PolicyNet,
         weight = torch.from_numpy(batch.t).to(device) if use_linear_cfr else None
 
         with amp_ctx():
-            logits = policy_net.forward_logits(tokens, pad_mask, dpos)
-            # Mask illegal slots, then log_softmax in fp32 (numerically safer).
-            # Fill with the dtype's most-negative finite value: under --amp
-            # `logits` is fp16 and a literal -1e9 overflows Half (max |x| ≈
-            # 65504), raising inside masked_fill before the .float() upcast.
-            # finfo(dtype).min is representable by construction and still drives
-            # illegal-slot probabilities to 0 after softmax.
-            masked = logits.masked_fill(legal_mask < 0.5,
-                                        torch.finfo(logits.dtype).min)
-            log_p  = nn.functional.log_softmax(masked.float(), dim=-1)
+            if fwd is not None:
+                # DDP entry point: PolicyNet.forward → masked-softmax probs.
+                # Illegal slots are exactly 0 (softmax of finfo.min); take the
+                # log in fp32 with a floor so a legal-slot prob near 0 doesn't
+                # hit log(0)=-inf (and 1e-9 doesn't underflow to 0 in fp16).
+                probs = fwd(tokens, pad_mask, dpos, legal_mask)
+                log_p = torch.log(probs.float().clamp_min(1e-9))
+            else:
+                logits = policy_net.forward_logits(tokens, pad_mask, dpos)
+                # Mask illegal slots, then log_softmax in fp32 (numerically
+                # safer). Fill with the dtype's most-negative finite value:
+                # under --amp `logits` is fp16 and a literal -1e9 overflows Half
+                # (max |x| ≈ 65504), raising inside masked_fill before the
+                # .float() upcast. finfo(dtype).min is representable by
+                # construction and still drives illegal slots to 0 after softmax.
+                masked = logits.masked_fill(legal_mask < 0.5,
+                                            torch.finfo(logits.dtype).min)
+                log_p  = nn.functional.log_softmax(masked.float(), dim=-1)
             ce = -(target * log_p).sum(dim=-1)                   # (B,)
             if weight is not None:
                 w = weight / weight.mean().clamp(min=1.0)
@@ -220,7 +246,7 @@ def train_policy_net(policy_net: PolicyNet,
         scaler.step(opt)
         scaler.update()
         losses.append(float(loss.item()))
-        if step - last_log_step >= max(1, n_steps // 10):
+        if verbose and step - last_log_step >= max(1, n_steps // 10):
             last_log_step = step
             print(f"  policy step={step}/{n_steps} loss={loss.item():.4f} "
                   f"grad={float(gn):.2f}")

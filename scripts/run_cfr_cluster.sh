@@ -19,14 +19,17 @@
 # bare command is the recommended run:
 #   bash scripts/run_cfr_cluster.sh cfr.sif /scratch/$USER/cfr_run
 # Defaults: NPROC=all GPUs, AMP=1, ADV_GRAD_STEPS=3000 (DDP) / 5000 (1 GPU),
-#           MAX_RAISES=3, POLICY_EVERY=100, SAVE_BUFFERS=1, CKPT_EVERY=20.
+#           MAX_RAISES=3, SAVE_BUFFERS=1, CKPT_EVERY=20.
 # Override any via env, e.g.:
 #   AMP=0 ADV_GRAD_STEPS=5000 CKPT_EVERY=50 bash scripts/run_cfr_cluster.sh ...
 #
-# CFR_PG_TIMEOUT_S (default 8h) bounds how long idle ranks wait in the
-# end-of-iteration barrier while rank 0 runs its solo PolicyNet harvest
-# (POLICY_GRAD_STEPS steps, still > NCCL's 10-min default even at 5000). Raise
-# it if you bump POLICY_GRAD_STEPS back up or run without AMP.
+# This trains the AdvNets only. The deployable average policy is harvested
+# separately from the saved buffers (keep SAVE_BUFFERS=1):
+#   bash scripts/run_cfr_harvest.sh cfr.sif /scratch/$USER/cfr_run
+#
+# CFR_PG_TIMEOUT_S (default 30min) cushions the end-of-iteration barrier while
+# rank 0 does its solo probe + checkpoint save (seconds normally). Raise it only
+# if checkpointing a very large run is slow.
 #
 # Resume is AUTOMATIC: re-launching with the SAME ckpt-dir (and SAME NPROC, see
 # below) picks up the latest cfr_iter_*.ckpt + per-rank cfr_buffers_rank*.npz and
@@ -66,7 +69,6 @@ K="${K:-1000}"
 # — where each step sees NPROC×batch, so 3000 steps still refit on more data than
 # the old single-GPU 5000 — vs 5000 single-GPU (3000 there would under-fit).
 ADV_GRAD_STEPS="${ADV_GRAD_STEPS:-}"
-POLICY_GRAD_STEPS="${POLICY_GRAD_STEPS:-5000}"
 # weight_decay default 0: a controlled diagnostic showed 1e-3 freezes the AdvNet
 # to a constant action (kills hole-card discrimination). See cfr_coro.py.
 WEIGHT_DECAY="${WEIGHT_DECAY:-0}"
@@ -107,15 +109,14 @@ STACK_BB="${STACK_BB:-100}"
 PUSH_FOLD="${PUSH_FOLD:-0}"
 ORACLE_DEALS="${ORACLE_DEALS:-12000000}"
 
-# ── Tree-size + harvest knobs ───────────────────────────────────────────────
+# ── Tree-size + buffer knobs ────────────────────────────────────────────────
 # MAX_RAISES caps voluntary raises per street (training-only action abstraction)
 # — bounds the deep-stack re-raise wars that make full-depth 100bb traversal
-# explode. 0 = uncapped. POLICY_EVERY (>0) periodically trains the PolicyNet and
-# prints the per-street AA/72o probe of the AVERAGE strategy (the GTO-evolution
-# signal). SAVE_BUFFERS=1 persists the reservoirs with each checkpoint for an
-# exact, zero-regression resume (multi-GB; raise CKPT_EVERY if I/O dominates).
+# explode. 0 = uncapped. SAVE_BUFFERS=1 persists the reservoirs with each
+# checkpoint for an exact, zero-regression resume AND so the average policy can
+# be harvested offline later (scripts/run_cfr_harvest.sh) — keep it on. Multi-GB;
+# raise CKPT_EVERY if I/O dominates.
 MAX_RAISES="${MAX_RAISES:-3}"
-POLICY_EVERY="${POLICY_EVERY:-100}"
 SAVE_BUFFERS="${SAVE_BUFFERS:-1}"
 # CKPT_EVERY=20: a cluster wall-time kill loses up to this many iterations, so
 # keep it modest for the 15-day-limit → restart workflow (the buffer write is a
@@ -126,7 +127,6 @@ CKPT_EVERY="${CKPT_EVERY:-20}"
 AMP="${AMP:-1}"
 
 EXTRA_FLAGS=(--max-raises-per-street "$MAX_RAISES"
-             --policy-every-iter "$POLICY_EVERY"
              --checkpoint-every-iter "$CKPT_EVERY")
 [[ "$SAVE_BUFFERS" == "1" ]] || EXTRA_FLAGS+=(--no-save-buffers)
 [[ "$AMP" == "1" ]] && EXTRA_FLAGS+=(--amp)
@@ -153,7 +153,7 @@ echo "[run_cfr_cluster] ckpt=$CKPT_DIR"
 echo "[run_cfr_cluster] actors=$ACTORS iters=$ITERS K=$K"
 echo "[run_cfr_cluster] d_model=$D_MODEL layers=$LAYERS heads=$N_HEADS d_ff=$D_FF device=$DEVICE"
 echo "[run_cfr_cluster] stage: stack_bb=$STACK_BB push_fold=$PUSH_FOLD oracle_deals=$ORACLE_DEALS"
-echo "[run_cfr_cluster] tree: max_raises=$MAX_RAISES policy_every=$POLICY_EVERY save_buffers=$SAVE_BUFFERS ckpt_every=$CKPT_EVERY"
+echo "[run_cfr_cluster] tree: max_raises=$MAX_RAISES save_buffers=$SAVE_BUFFERS ckpt_every=$CKPT_EVERY"
 echo "[run_cfr_cluster] ddp: nproc=$NPROC (1 ⇒ single-process; >1 ⇒ torchrun multi-GPU)"
 echo "[run_cfr_cluster] resume: auto from latest cfr_iter_*.ckpt in ckpt-dir (empty dir ⇒ fresh)"
 nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv || true
@@ -175,7 +175,6 @@ singularity exec --nv \
         --n-iterations        "$ITERS" \
         --n-traversals-per-iter "$K" \
         --adv-grad-steps      "$ADV_GRAD_STEPS" \
-        --policy-grad-steps   "$POLICY_GRAD_STEPS" \
         --weight-decay        "$WEIGHT_DECAY" \
         --d-model             "$D_MODEL" \
         --n-layers            "$LAYERS" \

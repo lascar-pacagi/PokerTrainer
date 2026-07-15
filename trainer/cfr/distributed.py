@@ -21,15 +21,16 @@ import torch
 import torch.distributed as dist
 
 
-# Collective timeout for the process group. The NCCL default (10 min) aborts any
-# collective blocked longer than that — which kills ranks 1..N-1 while they wait
-# in the end-of-iteration barrier for rank 0 to finish its *solo* PolicyNet
-# harvest (--policy-grad-steps → minutes-to-hours of single-GPU work the other
-# ranks skip). The harvest itself runs no collectives (policy_net is not DDP-wrapped),
-# so a generous timeout simply lets the idle ranks wait it out; a genuine refit
-# deadlock is still bounded by the job's Slurm wall-time. Override via env for
-# non-AMP runs or larger --policy-grad-steps.
-_PG_TIMEOUT = timedelta(seconds=int(os.environ.get("CFR_PG_TIMEOUT_S", str(8 * 3600))))
+# Collective timeout for the process group. NCCL's default (10 min) aborts any
+# collective blocked longer than that, killing ranks 1..N-1 while they wait in
+# the end-of-iteration barrier for rank 0's solo probe + net-checkpoint save.
+# That section is short (seconds), so a modest 30-min cushion is plenty and
+# still surfaces a genuine deadlock reasonably fast (Slurm wall-time bounds it
+# regardless). NOTE: the old hours-long *inline* PolicyNet harvest that once
+# forced an 8h timeout here is gone — the average policy is now harvested
+# offline (cfr.harvest_policy), where DDP keeps every rank in lockstep. Override
+# via env for unusually slow checkpointing.
+_PG_TIMEOUT = timedelta(seconds=int(os.environ.get("CFR_PG_TIMEOUT_S", str(30 * 60))))
 
 
 @dataclass
